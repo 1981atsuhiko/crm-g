@@ -23,7 +23,7 @@ applyTo: "**/*.py"
 ## 安全性・堅牢性
 - 可変オブジェクトをデフォルト引数にしない（`def f(x=[])` の禁止）。
 - 裸の `except:` と `except Exception: pass` を使わない。独自例外を定義し、`raise ... from` で原因を保持する。
-- ファイル・DB 接続は `with` で確実に解放する。
+- ファイルは `with` で確実に解放する。DB 接続は使用する API の仕様に従って確実に閉じる。`sqlite3.Connection` の `with` はトランザクション管理のみで接続を閉じないため、`contextlib.closing` または `try` / `finally` による `close()` を併用する。
 - `eval`、`exec`、`pickle`、`shell=True` の `subprocess` を使わない。
 - パスは `pathlib.Path` で扱う。テキストモードの `open()` には必ず `encoding="utf-8"` を指定し、改行の扱い（`newline`）を明示する。バイナリモードでは `encoding` と `newline` を指定しない。
 - 日時はタイムゾーン付きの `datetime` を使い、ナイーブな `datetime.now()` を使わない。
