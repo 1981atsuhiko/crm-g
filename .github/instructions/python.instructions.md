@@ -25,7 +25,7 @@ applyTo: "**/*.py"
 - 裸の `except:` と `except Exception: pass` を使わない。独自例外を定義し、`raise ... from` で原因を保持する。
 - ファイル・DB 接続は `with` で確実に解放する。
 - `eval`、`exec`、`pickle`、`shell=True` の `subprocess` を使わない。
-- パスは `pathlib.Path` で扱う。`open()` には必ず `encoding="utf-8"` を指定し、改行の扱い（`newline`）を明示する。
+- パスは `pathlib.Path` で扱う。テキストモードの `open()` には必ず `encoding="utf-8"` を指定し、改行の扱い（`newline`）を明示する。バイナリモードでは `encoding` と `newline` を指定しない。
 - 日時はタイムゾーン付きの `datetime` を使い、ナイーブな `datetime.now()` を使わない。
 
 ## 配布
