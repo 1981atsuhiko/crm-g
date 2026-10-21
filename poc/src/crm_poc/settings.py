@@ -30,3 +30,9 @@ WIDGETS_PATH = "widgets"
 
 DOWNLOAD_OK_BYTES = b"poc-download-ok"
 DOWNLOAD_FAILURE_MESSAGE = "poc download failure"
+
+EXE_VIEWS_DIRECTORY_NAME = "views"
+EXE_PROBE_VIEW_FILE = "probe.py"
+EXE_LICENSES_VIEW_FILE = "licenses.py"
+EXE_PROBE_PATH = "probe"
+EXE_LICENSES_PATH = "licenses"
