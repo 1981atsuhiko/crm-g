@@ -34,7 +34,10 @@ line-ending = "cr-lf"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "C90", "PL", "S", "ANN", "TID"]
-ignore = ["PLR2004"] # マジックナンバーの一般的な誤検知が多いため、個別の定数化はコーディング規約で判断する
+ignore = [
+    "PLR2004", # マジックナンバーの一般的な誤検知が多いため、個別の定数化はコーディング規約で判断する
+    "SIM108", # コーディング規約でバックエンドの三項演算子を禁止しているため
+]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
