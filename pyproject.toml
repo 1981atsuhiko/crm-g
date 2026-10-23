@@ -1,0 +1,66 @@
+[project]
+name = "crm-g"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "streamlit==1.66.0",
+    "jpholiday==1.0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-mock==3.17.0",
+    "pytest-cov==7.1.0",
+    "coverage==7.16.2",
+    "ruff==0.17.1",
+    "mypy==2.4.0",
+]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.format]
+line-ending = "cr-lf"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "C90", "PL", "S", "ANN", "TID"]
+ignore = ["PLR2004"] # マジックナンバーの一般的な誤検知が多いため、個別の定数化はコーディング規約で判断する
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"sqlite3" = { msg = "ドメイン層は sqlite3 を import しない（ARC-002）" }
+"streamlit" = { msg = "ドメイン層・アプリケーション層・cli は streamlit を import しない（ARC-002）" }
+"jpholiday" = { msg = "ドメイン層は jpholiday を import しない。営業日カレンダーを受け取る（ARC-002、ARC-012）" }
+"csv" = { msg = "ドメイン層は csv を import しない（ARC-002）" }
+"crm_g.ui" = { msg = "アプリケーション層・cli は UI 層に依存しない（ARC-002）" }
+
+[tool.ruff.lint.per-file-ignores]
+# ui 層は streamlit・crm_g.ui（自パッケージ内の相対参照）を使うため、TID251 を適用しない（ARC-002）
+"src/crm_g/ui/**" = ["TID251"]
+"tests/**" = ["TID251", "S101", "S603"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+mypy_path = "src"
+explicit_package_bases = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/crm_g"]
