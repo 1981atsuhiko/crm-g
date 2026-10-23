@@ -12,6 +12,8 @@ import pytest
 from crm_g.infrastructure.backup import restore_backup
 from crm_g.infrastructure.migration import (
     ChecksumMismatchError,
+    DuplicateMigrationVersionError,
+    InvalidMigrationFilenameError,
     MigrationFailedError,
     UnknownMigrationError,
     apply_migrations,
@@ -35,9 +37,7 @@ def test_tc_arc_009_initial_migration_is_applied_in_order(tmp_path: Path) -> Non
         applied = apply_migrations(connection, ddl_dir, db_path, tmp_path / "backups")
 
         assert applied == ("001_create_a", "002_create_b")
-        rows = connection.execute(
-            "SELECT version FROM schema_migration ORDER BY version"
-        ).fetchall()
+        rows = connection.execute("SELECT name FROM schema_migration ORDER BY version").fetchall()
         assert [row[0] for row in rows] == ["001_create_a", "002_create_b"]
         connection.execute("SELECT * FROM a")
         connection.execute("SELECT * FROM b")
@@ -145,9 +145,48 @@ def test_tc_arc_014_failed_migration_can_be_restored_from_backup(tmp_path: Path)
 
     restored = sqlite3.connect(db_path)
     try:
-        versions = [
-            row[0] for row in restored.execute("SELECT version FROM schema_migration").fetchall()
-        ]
-        assert versions == ["001_create_a"]
+        names = [row[0] for row in restored.execute("SELECT name FROM schema_migration").fetchall()]
+        assert names == ["001_create_a"]
     finally:
         restored.close()
+
+
+def test_apply_migrations_rejects_filename_without_numeric_prefix(tmp_path: Path) -> None:
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    connection = sqlite3.connect(tmp_path / "test.db")
+
+    try:
+        with pytest.raises(InvalidMigrationFilenameError, match="create_a"):
+            apply_migrations(connection, ddl_dir, tmp_path / "test.db", tmp_path / "backups")
+    finally:
+        connection.close()
+
+
+def test_apply_migrations_rejects_duplicate_version(tmp_path: Path) -> None:
+    """ゼロ埋めの桁数が異なるファイルが、同じ版番号を指す場合を拒否する。"""
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    _write_sql(ddl_dir, "1_create_b.sql", "CREATE TABLE b (id INTEGER PRIMARY KEY);")
+    connection = sqlite3.connect(tmp_path / "test.db")
+
+    try:
+        with pytest.raises(DuplicateMigrationVersionError, match="1"):
+            apply_migrations(connection, ddl_dir, tmp_path / "test.db", tmp_path / "backups")
+    finally:
+        connection.close()
+
+
+def test_apply_migrations_orders_by_integer_version_not_filename_text(tmp_path: Path) -> None:
+    """ゼロ埋めの桁数が揃わないファイルでも、整数の版番号の順に適用する。"""
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "2_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    _write_sql(ddl_dir, "10_create_b.sql", "CREATE TABLE b (id INTEGER PRIMARY KEY);")
+    connection = sqlite3.connect(tmp_path / "test.db")
+
+    try:
+        applied = apply_migrations(connection, ddl_dir, tmp_path / "test.db", tmp_path / "backups")
+
+        assert applied == ("2_create_a", "10_create_b")
+    finally:
+        connection.close()
