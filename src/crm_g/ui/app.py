@@ -18,6 +18,7 @@ _VIEWS_DIR = Path(__file__).parent / "views"
 _SETUP_PATH = "setup"
 _LOGIN_PATH = "login"
 _HOME_PATH = "home"
+_BUSINESS_CALENDAR_PATH = "business_calendar"
 
 
 def _is_passcode_set() -> bool:
@@ -30,17 +31,22 @@ def _is_authenticated() -> bool:
     return bool(st.session_state.get(AUTHENTICATED_KEY, False))
 
 
-def _page(file_name: str, url_path: str, *, title: str) -> st.Page:
-    return st.Page(_VIEWS_DIR / file_name, title=title, url_path=url_path, default=True)
+def _page(file_name: str, url_path: str, *, title: str, default: bool = False) -> st.Page:
+    return st.Page(_VIEWS_DIR / file_name, title=title, url_path=url_path, default=default)
 
 
-def _build_pages() -> list[st.Page]:
+def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
     if not _is_passcode_set():
-        return [_page("setup.py", _SETUP_PATH, title="パスコード設定")]
+        return [_page("setup.py", _SETUP_PATH, title="パスコード設定", default=True)]
     if not _is_authenticated():
-        return [_page("login.py", _LOGIN_PATH, title="ログイン")]
-    # PH-06 以降で、正式な画面（社員・給与・賞与など）を追加する。
-    return [_page("home.py", _HOME_PATH, title="ダッシュボード")]
+        return [_page("login.py", _LOGIN_PATH, title="ログイン", default=True)]
+    # PH-07 以降で、正式な画面（社員・給与・賞与など）を追加する。
+    return {
+        "ダッシュボード": [_page("home.py", _HOME_PATH, title="ダッシュボード", default=True)],
+        "設定": [
+            _page("business_calendar.py", _BUSINESS_CALENDAR_PATH, title="営業日カレンダー"),
+        ],
+    }
 
 
 def main() -> None:
