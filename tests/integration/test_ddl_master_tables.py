@@ -1,9 +1,9 @@
 """DDL（マスタテーブル）の試験（TC-DBD-001〜006、008）。
 
 実際の DDL/ 配下の連番SQLに対して実施する（実装計画書5.3節：PH-04は実際のDDL/で
-確認する）。TC-DBD-007（外部キーの削除）は、employee を参照するテーブルが
-無いため、該当テーブルを追加するPH-04-2で実施する。TC-DBD-017（初期データ）は
-PH-04-4で実施する。
+確認する）。TC-DBD-007（外部キーの削除）は、PH-04-2・03で実施する。TC-DBD-017
+（初期データ）はPH-04-4で実施する。work_status には初期データ（PH-04-4）が
+既に入っているため、試験では初期データと衝突しないコード（TEST_DEV）を使う。
 """
 
 import sqlite3
@@ -18,8 +18,7 @@ _DDL_DIR = Path(__file__).resolve().parents[2] / "DDL"
 _TIMESTAMP = "2026-10-21T00:00:00.000000Z"
 
 # operation_log・schema_migration は、created_at・updated_at を持たない（DBD-011）。
-# この時点では、まだ DDL に作っていない（operation_log は PH-04-4）。
-_TABLES_WITHOUT_COMMON_COLUMNS = {"schema_migration"}
+_TABLES_WITHOUT_COMMON_COLUMNS = {"schema_migration", "operation_log"}
 
 
 @pytest.fixture
@@ -57,7 +56,7 @@ def test_tc_dbd_002_integer_column_rejects_text(db_path: Path) -> None:
         connection.execute(
             "INSERT INTO work_status "
             "(code, name, is_billable, is_cost_target, sort_order, created_at, updated_at) "
-            "VALUES ('DEV', '開発稼働', 1, 1, 'abc', ?, ?)",
+            "VALUES ('TEST_DEV', '開発稼働', 1, 1, 'abc', ?, ?)",
             (_TIMESTAMP, _TIMESTAMP),
         )
 
@@ -97,7 +96,7 @@ def test_tc_dbd_004_datetime_without_z_is_rejected(db_path: Path) -> None:
         connection.execute(
             "INSERT INTO work_status "
             "(code, name, is_billable, is_cost_target, sort_order, created_at, updated_at) "
-            "VALUES ('DEV', '開発稼働', 1, 1, 1, '2026-10-21 00:00:00', ?)",
+            "VALUES ('TEST_DEV', '開発稼働', 1, 1, 1, '2026-10-21 00:00:00', ?)",
             (_TIMESTAMP,),
         )
 
@@ -117,7 +116,7 @@ def test_tc_dbd_004_datetime_not_matching_exact_format_is_rejected(
         connection.execute(
             "INSERT INTO work_status "
             "(code, name, is_billable, is_cost_target, sort_order, created_at, updated_at) "
-            "VALUES ('DEV', '開発稼働', 1, 1, 1, ?, ?)",
+            "VALUES ('TEST_DEV', '開発稼働', 1, 1, 1, ?, ?)",
             (invalid_timestamp, _TIMESTAMP),
         )
 
@@ -127,12 +126,12 @@ def test_tc_dbd_004_datetime_with_z_is_accepted(db_path: Path) -> None:
         connection.execute(
             "INSERT INTO work_status "
             "(code, name, is_billable, is_cost_target, sort_order, created_at, updated_at) "
-            "VALUES ('DEV', '開発稼働', 1, 1, 1, ?, ?)",
+            "VALUES ('TEST_DEV', '開発稼働', 1, 1, 1, ?, ?)",
             (_TIMESTAMP, _TIMESTAMP),
         )
         connection.commit()
 
-        row = connection.execute("SELECT code FROM work_status WHERE code = 'DEV'").fetchone()
+        row = connection.execute("SELECT code FROM work_status WHERE code = 'TEST_DEV'").fetchone()
         assert row is not None
 
 
@@ -141,7 +140,7 @@ def test_tc_dbd_005_boolean_column_rejects_other_than_zero_or_one(db_path: Path)
         connection.execute(
             "INSERT INTO work_status "
             "(code, name, is_billable, is_cost_target, sort_order, created_at, updated_at) "
-            "VALUES ('DEV', '開発稼働', 2, 1, 1, ?, ?)",
+            "VALUES ('TEST_DEV', '開発稼働', 2, 1, 1, ?, ?)",
             (_TIMESTAMP, _TIMESTAMP),
         )
 
