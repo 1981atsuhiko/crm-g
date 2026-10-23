@@ -7,6 +7,9 @@ dependencies = [
     "jpholiday==1.0.3",
 ]
 
+[project.scripts]
+crm-g = "crm_g.cli.launcher:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest==9.1.1",
@@ -52,6 +55,9 @@ max-complexity = 10
 [tool.ruff.lint.per-file-ignores]
 # ui 層は streamlit・crm_g.ui（自パッケージ内の相対参照）を使うため、TID251 を適用しない（ARC-002）
 "src/crm_g/ui/**" = ["TID251"]
+# 起動用launcherだけ、streamlit.web.bootstrap の起動に限定してTID251を適用しない
+# （ARC-014。POC-08で実証済みの方式）。
+"src/crm_g/cli/launcher.py" = ["TID251"]
 "tests/**" = ["TID251", "S101", "S603"]
 
 [tool.mypy]
