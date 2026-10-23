@@ -10,11 +10,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-_MIN_SQLITE_VERSION = (3, 37, 0)
+_MIN_SQLITE_VERSION = (3, 38, 0)
 
 
 class UnsupportedSqliteVersionError(RuntimeError):
-    """同梱・利用の SQLite が、必要な最小版（3.37.0）未満のときのエラー。"""
+    """同梱・利用の SQLite が、必要な最小版（3.38.0）未満のときのエラー。"""
 
 
 def _check_sqlite_version() -> None:

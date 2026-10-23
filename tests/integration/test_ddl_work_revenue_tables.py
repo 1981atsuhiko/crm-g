@@ -54,7 +54,7 @@ def test_work_period_rejects_billing_ratio_above_10000(db_path: Path) -> None:
         connection.execute(
             "INSERT INTO work_status "
             "(code, name, is_billable, is_cost_target, sort_order, created_at, updated_at) "
-            "VALUES ('DEV', '開発稼働', 1, 1, 1, ?, ?)",
+            "VALUES ('TEST_DEV', '開発稼働', 1, 1, 1, ?, ?)",
             (_TIMESTAMP, _TIMESTAMP),
         )
         with pytest.raises(sqlite3.IntegrityError):
@@ -62,7 +62,7 @@ def test_work_period_rejects_billing_ratio_above_10000(db_path: Path) -> None:
                 "INSERT INTO work_period "
                 "(employee_id, start_date, work_status_code, billing_ratio_bp, "
                 "created_at, updated_at) "
-                "VALUES (1, '2026-10-01', 'DEV', 10001, ?, ?)",
+                "VALUES (1, '2026-10-01', 'TEST_DEV', 10001, ?, ?)",
                 (_TIMESTAMP, _TIMESTAMP),
             )
 
@@ -73,13 +73,13 @@ def test_work_period_defaults_billing_ratio_to_10000(db_path: Path) -> None:
         connection.execute(
             "INSERT INTO work_status "
             "(code, name, is_billable, is_cost_target, sort_order, created_at, updated_at) "
-            "VALUES ('DEV', '開発稼働', 1, 1, 1, ?, ?)",
+            "VALUES ('TEST_DEV', '開発稼働', 1, 1, 1, ?, ?)",
             (_TIMESTAMP, _TIMESTAMP),
         )
         connection.execute(
             "INSERT INTO work_period (employee_id, start_date, work_status_code, "
             "created_at, updated_at) "
-            "VALUES (1, '2026-10-01', 'DEV', ?, ?)",
+            "VALUES (1, '2026-10-01', 'TEST_DEV', ?, ?)",
             (_TIMESTAMP, _TIMESTAMP),
         )
         connection.commit()
@@ -238,19 +238,19 @@ def test_work_period_referenced_work_status_cannot_be_deleted(db_path: Path) -> 
         connection.execute(
             "INSERT INTO work_status "
             "(code, name, is_billable, is_cost_target, sort_order, created_at, updated_at) "
-            "VALUES ('DEV', '開発稼働', 1, 1, 1, ?, ?)",
+            "VALUES ('TEST_DEV', '開発稼働', 1, 1, 1, ?, ?)",
             (_TIMESTAMP, _TIMESTAMP),
         )
         connection.execute(
             "INSERT INTO work_period (employee_id, start_date, work_status_code, "
             "created_at, updated_at) "
-            "VALUES (1, '2026-10-01', 'DEV', ?, ?)",
+            "VALUES (1, '2026-10-01', 'TEST_DEV', ?, ?)",
             (_TIMESTAMP, _TIMESTAMP),
         )
         connection.commit()
 
         with pytest.raises(sqlite3.IntegrityError):
-            connection.execute("DELETE FROM work_status WHERE code = 'DEV'")
+            connection.execute("DELETE FROM work_status WHERE code = 'TEST_DEV'")
 
 
 def test_rate_history_referenced_assignment_cannot_be_deleted(db_path: Path) -> None:

@@ -60,11 +60,11 @@ def test_open_connection_closes_connection_on_exit(tmp_path: Path) -> None:
 def test_tc_arc_007_startup_aborts_on_unsupported_sqlite_version(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """SQLiteの版を3.36.0（3.37.0未満）に差し替えて起動する（TC-ARC-007）。"""
-    monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 36, 0))
+    """SQLiteの版を3.37.0（3.38.0未満）に差し替えて起動する（TC-ARC-007）。"""
+    monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 37, 0))
 
     with (
-        pytest.raises(UnsupportedSqliteVersionError, match="3.37.0"),
+        pytest.raises(UnsupportedSqliteVersionError, match="3.38.0"),
         open_connection(tmp_path / "test.db"),
     ):
         pass
