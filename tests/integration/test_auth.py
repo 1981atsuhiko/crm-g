@@ -117,9 +117,7 @@ def test_tc_scd_008_app_credential_never_stores_raw_passcode(db_path: Path) -> N
     with open_connection(db_path) as connection:
         setup_passcode(connection, _PASSCODE, _PASSCODE)
 
-        row = connection.execute(
-            "SELECT salt, hash FROM app_credential WHERE id = 1"
-        ).fetchone()
+        row = connection.execute("SELECT salt, hash FROM app_credential WHERE id = 1").fetchone()
         assert _PASSCODE not in row[0]
         assert _PASSCODE not in row[1]
 
@@ -142,9 +140,7 @@ def test_tc_scd_009_param_upgrade_rehashes_after_successful_auth(db_path: Path) 
         )
         connection.commit()
 
-        old_hash = connection.execute(
-            "SELECT hash FROM app_credential WHERE id = 1"
-        ).fetchone()[0]
+        old_hash = connection.execute("SELECT hash FROM app_credential WHERE id = 1").fetchone()[0]
 
         verify_passcode(connection, _PASSCODE)
 
@@ -251,9 +247,7 @@ def test_lockout_duration_is_five_minutes(db_path: Path) -> None:
                 verify_passcode(connection, "wrong@3sss.co.jp")
 
         locked_until = from_iso8601(
-            connection.execute(
-                "SELECT locked_until FROM app_credential WHERE id = 1"
-            ).fetchone()[0]
+            connection.execute("SELECT locked_until FROM app_credential WHERE id = 1").fetchone()[0]
         )
         delta = (locked_until - before).total_seconds()
         assert 295 <= delta <= 305

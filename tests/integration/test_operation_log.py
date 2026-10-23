@@ -44,9 +44,7 @@ def test_record_operation_log_serializes_before_after_as_json(db_path: Path) -> 
             ),
         )
 
-        row = connection.execute(
-            "SELECT before_value, after_value FROM operation_log"
-        ).fetchone()
+        row = connection.execute("SELECT before_value, after_value FROM operation_log").fetchone()
         assert row[0] == '{"base_salary": 300000}'
         assert row[1] == '{"base_salary": 320000}'
 
@@ -57,8 +55,10 @@ def test_record_operation_log_rolls_back_with_the_caller_transaction(db_path: Pa
         with pytest.raises(sqlite3.IntegrityError), transaction(connection):
             record_operation_log(connection, Operation.VIEW, target_table="salary_history")
             # STRICT制約に違反する更新で、トランザクション全体を失敗させる。
-            connection.execute("INSERT INTO operation_log (occurred_at, operation, target_table) "
-                               "VALUES ('invalid', '閲覧', 'x')")
+            connection.execute(
+                "INSERT INTO operation_log (occurred_at, operation, target_table) "
+                "VALUES ('invalid', '閲覧', 'x')"
+            )
 
         count = connection.execute("SELECT COUNT(*) FROM operation_log").fetchone()[0]
         assert count == 0
