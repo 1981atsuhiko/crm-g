@@ -7,7 +7,7 @@ from enum import StrEnum
 from fractions import Fraction
 from typing import cast
 
-from crm_g.domain.business_days import BusinessCalendar, is_present
+from crm_g.domain.business_days import BusinessCalendar, is_present, is_within_period
 from crm_g.domain.pay_item import PayItem
 from crm_g.domain.rounding import ceil_yen
 from crm_g.domain.salary_history import SalaryHistoryItem
@@ -33,9 +33,7 @@ class WorkPeriod:
             raise ValueError("end_date は start_date 以後にしてください")
 
     def covers(self, day: date) -> bool:
-        if day < self.start_date:
-            return False
-        return self.end_date is None or day <= self.end_date
+        return is_within_period(day, self.start_date, self.end_date)
 
 
 @dataclass(frozen=True)
@@ -56,9 +54,7 @@ class WorkStatusRate:
     def covers(self, work_status_code: str, day: date) -> bool:
         if work_status_code != self.work_status_code:
             return False
-        if day < self.valid_from:
-            return False
-        return self.valid_to is None or day <= self.valid_to
+        return is_within_period(day, self.valid_from, self.valid_to)
 
 
 @dataclass(frozen=True)

@@ -22,6 +22,13 @@ class BusinessCalendar:
         return len(self.business_days)
 
 
+def is_within_period(day: date, start: date, end: date | None) -> bool:
+    """day が、start〜end（end が None なら継続中）の期間に含まれるか。"""
+    if day < start:
+        return False
+    return end is None or day <= end
+
+
 def is_present(day: date, join_date: date | None, retire_date: date | None) -> bool:
     """営業日 day に在籍しているか（CLC-004）。入社日・退職日の当日は在籍に含める。"""
     if join_date is not None and day < join_date:
