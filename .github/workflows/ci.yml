@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality-gate:
+    runs-on: windows-latest
+    steps:
+      - name: チェックアウト
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Python 3.13 のセットアップ
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: 依存のインストール
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r locks/runtime-windows.txt
+          pip install -r locks/dev-windows.txt
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: ruff format --check
+        run: ruff format --check .
+
+      - name: mypy --strict
+        run: mypy --strict src tests
+
+      - name: pytest（カバレッジ計測）
+        run: pytest --cov=src/crm_g --cov-branch
+
+      - name: カバレッジ基準（ドメイン層 100%）
+        run: coverage report --include="src/crm_g/domain/*" --precision=2 --fail-under=100
+
+      - name: カバレッジ基準（アプリケーション層 80%以上）
+        run: coverage report --include="src/crm_g/application/*" --precision=2 --fail-under=80
