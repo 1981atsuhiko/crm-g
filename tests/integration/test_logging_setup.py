@@ -39,8 +39,15 @@ def test_setup_logging_respects_level(tmp_path: Path) -> None:
     assert "この行は出力される" in content
 
 
-def test_setup_logging_rotates_when_exceeding_max_bytes(tmp_path: Path) -> None:
-    logger = setup_logging(tmp_path, max_bytes=200, backup_count=1)
+def test_tc_arc_022_log_rotates_and_total_size_stays_within_limit(tmp_path: Path) -> None:
+    """ログの上限を小さくして、上限を超えるまで出力する（TC-ARC-022）。
+
+    ログが次のファイルに切り替わり、総量が上限（ファイルの数×1ファイルの上限）
+    以下になることを確認する。
+    """
+    max_bytes = 200
+    backup_count = 1
+    logger = setup_logging(tmp_path, max_bytes=max_bytes, backup_count=backup_count)
 
     for _ in range(20):
         logger.info("ローテーションを発生させるための行です")
@@ -48,3 +55,6 @@ def test_setup_logging_rotates_when_exceeding_max_bytes(tmp_path: Path) -> None:
         handler.flush()
 
     assert (tmp_path / "crm-g.log.1").exists()
+
+    total_size = sum(path.stat().st_size for path in tmp_path.glob("crm-g.log*") if path.is_file())
+    assert total_size <= max_bytes * (backup_count + 1)
