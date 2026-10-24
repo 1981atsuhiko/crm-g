@@ -24,6 +24,7 @@ _PAY_ITEM_PATH = "pay_item"
 _CALCULATION_SETTING_PATH = "calculation_setting"
 _BONUS_RULE_PATH = "bonus_rule"
 _EMPLOYEE_PATH = "employee"
+_SALARY_HISTORY_PATH = "salary_history"
 
 
 def _is_passcode_set() -> bool:
@@ -45,10 +46,13 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
         return [_page("setup.py", _SETUP_PATH, title="パスコード設定", default=True)]
     if not _is_authenticated():
         return [_page("login.py", _LOGIN_PATH, title="ログイン", default=True)]
-    # PH-08 以降で、正式な画面（給与・賞与など）を追加する。
+    # PH-09 以降で、正式な画面（稼働・単価・賞与など）を追加する。
     return {
         "ダッシュボード": [_page("home.py", _HOME_PATH, title="ダッシュボード", default=True)],
         "社員": [_page("employee.py", _EMPLOYEE_PATH, title="社員")],
+        "給与": [
+            _page("salary_history.py", _SALARY_HISTORY_PATH, title="給与履歴の登録"),
+        ],
         "設定": [
             _page("business_calendar.py", _BUSINESS_CALENDAR_PATH, title="営業日カレンダー"),
             _page("work_status.py", _WORK_STATUS_PATH, title="稼働状態"),
