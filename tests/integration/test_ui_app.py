@@ -134,3 +134,18 @@ def test_authenticated_session_can_open_business_calendar(localappdata: Path) ->
 
     assert _titles(app) == ["営業日カレンダー"]
     assert not app.exception
+
+
+def test_authenticated_session_can_open_employee_list(localappdata: Path) -> None:
+    db_path = localappdata / "crm-g" / "crm-g.db"
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+    app = AppTest.from_file(str(_APP_PATH), default_timeout=_APPTEST_TIMEOUT_SECONDS)
+    app.session_state[AUTHENTICATED_KEY] = True
+    app = app.run()
+    app.switch_page("views/employee.py")
+    app.run()
+
+    assert _titles(app) == ["社員一覧"]
+    assert not app.exception
