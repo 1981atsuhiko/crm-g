@@ -22,11 +22,17 @@ from crm_g.application.business_calendar import (
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
 from crm_g.ui.components.confirm_dialog import confirm_dialog
-from crm_g.ui.components.messages import show_errors, show_success, show_unexpected_error
+from crm_g.ui.components.messages import (
+    UNEXPECTED_ERROR_MESSAGE,
+    show_errors,
+    show_success,
+    show_unexpected_error,
+)
 
 _MIN_YEAR = 2025
 _WEEKDAY_NAMES = ("月", "火", "水", "木", "金", "土", "日")
 _PENDING_DAY_KEY = "business_calendar_pending_day"
+_LAST_ERROR_KEY = "business_calendar_last_error"
 
 
 class _PendingDay(TypedDict):
@@ -98,12 +104,15 @@ def _confirm_pending_day(db_path: Path, pending: _PendingDay) -> None:
     is_business = pending["is_business"]
     note = pending["note"]
 
+    # `confirm_dialog` は on_confirm の直後に rerun するため、ここで st.error 系を
+    # 呼んでも消えてしまう。失敗したときは、メッセージを session_state に残し、
+    # ダイアログを閉じた後の描画で表示する（`confirm_dialog` のdocstring参照）。
     def _save() -> None:
         with open_connection(db_path) as connection:
             try:
                 register_manual_day(connection, target_date, is_business, note or None)
             except Exception:
-                show_unexpected_error()
+                st.session_state[_LAST_ERROR_KEY] = UNEXPECTED_ERROR_MESSAGE
             else:
                 show_success("登録しました")
         st.session_state.pop(_PENDING_DAY_KEY, None)
@@ -144,6 +153,10 @@ def _render_register_form(db_path: Path) -> None:
 
 def render() -> None:
     st.title("営業日カレンダー")
+
+    last_error = st.session_state.pop(_LAST_ERROR_KEY, None)
+    if last_error is not None:
+        show_errors([last_error])
 
     year = st.selectbox("年", list(range(_MIN_YEAR, _max_year() + 1)), key="calendar_year")
     db_path = get_app_paths().db_path
