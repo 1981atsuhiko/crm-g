@@ -1,6 +1,8 @@
-"""社員（`SCN-020`、`SCN-021`、`TBL-001`）。
+"""社員（`SCN-020`、`SCN-021`、`SCN-022`、`TBL-001`）。
 
-一覧・詳細の閲覧に必要な参照機能をまとめる。登録・編集はPH-07-2で追加する。
+一覧・詳細の閲覧（PH-07-1）に加え、登録・編集（PH-07-2）をまとめる。登録・
+編集は、操作ログの対象外とする。給与・賞与の項目を含まないため（`SCD-020`）。
+再計算の接続はPH-10で行う。
 """
 
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
@@ -8,8 +10,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 
+from crm_g.domain.email_format import is_valid_email_format
+from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
+from crm_g.infrastructure.db import transaction
+
 ENROLLMENT_STATUSES = ("在籍", "退職予定", "退職", "契約満了", "移管")
 DEFAULT_ENROLLMENT_STATUSES = ("在籍", "退職予定")
+EMPLOYMENT_TYPES = ("正社員", "契約社員")
+GENDERS = ("男性", "女性", "その他")
 
 
 @dataclass(frozen=True)
@@ -309,3 +317,179 @@ def list_bonuses(connection: sqlite3.Connection, employee_id: int) -> tuple[Bonu
         )
         for row in rows
     )
+
+
+class InvalidEmailFormatError(RuntimeError):
+    """メールアドレスが、メールアドレス形式でないときのエラー。"""
+
+
+class DuplicateEmailError(RuntimeError):
+    """メールアドレスが、既存の社員と重複するときのエラー。"""
+
+
+class InvalidNameError(RuntimeError):
+    """氏名が、空のときのエラー。"""
+
+
+class DuplicateEmployeeNoError(RuntimeError):
+    """社員番号が、既存の社員と重複するときのエラー。"""
+
+
+class InvalidEmploymentTypeError(RuntimeError):
+    """雇用形態が、定義した値以外のときのエラー。"""
+
+
+class InvalidGenderError(RuntimeError):
+    """性別が、定義した値以外のときのエラー。"""
+
+
+class InvalidEnrollmentStatusError(RuntimeError):
+    """在籍ステータスが、定義した値以外のときのエラー。"""
+
+
+class InvalidBirthDateError(RuntimeError):
+    """生年月日が、今日以後のときのエラー。"""
+
+
+class InvalidRetireDateError(RuntimeError):
+    """退職日が、入社日より前のときのエラー。"""
+
+
+class EmployeeNotFoundError(RuntimeError):
+    """指定したIDの社員が、存在しないときのエラー。"""
+
+
+@dataclass(frozen=True)
+class EmployeeInput:
+    """社員の登録・変更で使う入力値（`SCN-022`）。
+
+    `email` は、登録のときだけ使う。変更では、既存の値を保つ（業務キーのため、
+    変更できない。`update_employee` はこの項目を書き込まない）。
+    """
+
+    email: str
+    name: str
+    name_kana: str | None
+    employee_no: str | None
+    employment_type: str | None
+    birth_date: date | None
+    gender: str | None
+    join_date: date
+    nearest_station: str | None
+    residence_area: str | None
+    job_type: str | None
+    enrollment_status: str
+    retire_date: date | None
+
+
+def _validate_employee_fields(data: EmployeeInput) -> None:
+    if not data.name:
+        raise InvalidNameError("氏名を入力してください")
+    if data.employment_type is not None and data.employment_type not in EMPLOYMENT_TYPES:
+        raise InvalidEmploymentTypeError(
+            f"雇用形態は、{'、'.join(EMPLOYMENT_TYPES)}のいずれかにしてください"
+        )
+    if data.gender is not None and data.gender not in GENDERS:
+        raise InvalidGenderError(f"性別は、{'、'.join(GENDERS)}のいずれかにしてください")
+    if data.enrollment_status not in ENROLLMENT_STATUSES:
+        raise InvalidEnrollmentStatusError(
+            f"在籍ステータスは、{'、'.join(ENROLLMENT_STATUSES)}のいずれかにしてください"
+        )
+    if data.birth_date is not None and data.birth_date >= date.today():
+        raise InvalidBirthDateError("生年月日は、今日より前にしてください")
+    if data.retire_date is not None and data.retire_date < data.join_date:
+        raise InvalidRetireDateError("退職日は、入社日以後にしてください")
+
+
+def _check_duplicate_employee_no(
+    connection: sqlite3.Connection, employee_no: str | None, *, exclude_id: int | None
+) -> None:
+    if not employee_no:
+        return
+    query = "SELECT 1 FROM employee WHERE employee_no = ?"
+    params: list[object] = [employee_no]
+    if exclude_id is not None:
+        query += " AND id != ?"
+        params.append(exclude_id)
+    if connection.execute(query, params).fetchone() is not None:
+        raise DuplicateEmployeeNoError(f"社員番号 {employee_no} は、既に使われています")
+
+
+def create_employee(connection: sqlite3.Connection, data: EmployeeInput) -> int:
+    """社員を、新しいメールアドレスで登録する（`SCN-022`）。登録したIDを返す。"""
+    email = data.email.strip().lower()
+    if not is_valid_email_format(email):
+        raise InvalidEmailFormatError("メールアドレスは、メールアドレス形式の文字列にしてください")
+    _validate_employee_fields(data)
+
+    with transaction(connection):
+        if connection.execute("SELECT 1 FROM employee WHERE email = ?", (email,)).fetchone():
+            raise DuplicateEmailError(f"メールアドレス {email} は、既に使われています")
+        _check_duplicate_employee_no(connection, data.employee_no, exclude_id=None)
+
+        now = to_iso8601(utc_now())
+        cursor = connection.execute(
+            "INSERT INTO employee "
+            "(email, name, name_kana, employee_no, employment_type, birth_date, gender, "
+            "join_date, nearest_station, residence_area, job_type, enrollment_status, "
+            "retire_date, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                email,
+                data.name,
+                data.name_kana,
+                data.employee_no,
+                data.employment_type,
+                data.birth_date.isoformat() if data.birth_date else None,
+                data.gender,
+                data.join_date.isoformat(),
+                data.nearest_station,
+                data.residence_area,
+                data.job_type,
+                data.enrollment_status,
+                data.retire_date.isoformat() if data.retire_date else None,
+                now,
+                now,
+            ),
+        )
+        new_id = cursor.lastrowid
+        assert new_id is not None  # noqa: S101 AUTOINCREMENT主キーのINSERT直後のため必ず取得できる
+
+    return new_id
+
+
+def update_employee(connection: sqlite3.Connection, employee_id: int, data: EmployeeInput) -> None:
+    """既存の社員を変更する（`SCN-022`）。メールアドレスは変更しない（業務キーのため）。"""
+    _validate_employee_fields(data)
+
+    with transaction(connection):
+        if (
+            connection.execute("SELECT 1 FROM employee WHERE id = ?", (employee_id,)).fetchone()
+            is None
+        ):
+            raise EmployeeNotFoundError(f"社員（id={employee_id}）が見つかりません")
+        _check_duplicate_employee_no(connection, data.employee_no, exclude_id=employee_id)
+
+        now = to_iso8601(utc_now())
+        connection.execute(
+            "UPDATE employee SET name = ?, name_kana = ?, employee_no = ?, "
+            "employment_type = ?, birth_date = ?, gender = ?, join_date = ?, "
+            "nearest_station = ?, residence_area = ?, job_type = ?, "
+            "enrollment_status = ?, retire_date = ?, updated_at = ? WHERE id = ?",
+            (
+                data.name,
+                data.name_kana,
+                data.employee_no,
+                data.employment_type,
+                data.birth_date.isoformat() if data.birth_date else None,
+                data.gender,
+                data.join_date.isoformat(),
+                data.nearest_station,
+                data.residence_area,
+                data.job_type,
+                data.enrollment_status,
+                data.retire_date.isoformat() if data.retire_date else None,
+                now,
+                employee_id,
+            ),
+        )
