@@ -22,6 +22,7 @@ _BUSINESS_CALENDAR_PATH = "business_calendar"
 _WORK_STATUS_PATH = "work_status"
 _PAY_ITEM_PATH = "pay_item"
 _CALCULATION_SETTING_PATH = "calculation_setting"
+_BONUS_RULE_PATH = "bonus_rule"
 
 
 def _is_passcode_set() -> bool:
@@ -51,6 +52,7 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
             _page("work_status.py", _WORK_STATUS_PATH, title="稼働状態"),
             _page("pay_item.py", _PAY_ITEM_PATH, title="給与項目"),
             _page("calculation_setting.py", _CALCULATION_SETTING_PATH, title="計算設定"),
+            _page("bonus_rule.py", _BONUS_RULE_PATH, title="賞与ルール・掛け率"),
         ],
     }
 
