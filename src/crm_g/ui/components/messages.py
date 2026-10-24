@@ -8,6 +8,8 @@ from collections.abc import Iterable
 
 import streamlit as st
 
+UNEXPECTED_ERROR_MESSAGE = "エラーが発生しました。しばらくしてからやり直してください。"
+
 
 def show_errors(messages: Iterable[str]) -> None:
     """検証エラー・計算エラー・保存失敗など、やり直しが必要なエラーを表示する。"""
@@ -32,4 +34,4 @@ def show_status(message: str) -> None:
 
 def show_unexpected_error() -> None:
     """想定外の例外を、原因を特定できない一般的なメッセージで表示する（`ARC-018`）。"""
-    st.error("エラーが発生しました。しばらくしてからやり直してください。")
+    st.error(UNEXPECTED_ERROR_MESSAGE)

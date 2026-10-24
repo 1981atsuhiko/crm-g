@@ -19,6 +19,7 @@ _SETUP_PATH = "setup"
 _LOGIN_PATH = "login"
 _HOME_PATH = "home"
 _BUSINESS_CALENDAR_PATH = "business_calendar"
+_WORK_STATUS_PATH = "work_status"
 
 
 def _is_passcode_set() -> bool:
@@ -45,6 +46,7 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
         "ダッシュボード": [_page("home.py", _HOME_PATH, title="ダッシュボード", default=True)],
         "設定": [
             _page("business_calendar.py", _BUSINESS_CALENDAR_PATH, title="営業日カレンダー"),
+            _page("work_status.py", _WORK_STATUS_PATH, title="稼働状態"),
         ],
     }
 
