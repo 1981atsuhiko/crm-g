@@ -1,18 +1,34 @@
-"""社員画面（`SCN-020` 社員一覧、`SCN-021` 社員詳細）。
+"""社員画面（`SCN-020` 社員一覧、`SCN-021` 社員詳細、`SCN-022` 社員の登録・編集）。
 
 `SCN-021`・`SCN-022` は、`SCN-020` から開く画面で、メニューには出さない
-（画面設計書 2.2）。このファイル1つで、一覧・詳細の表示モードを
-`st.session_state` で切り替える。登録・編集（`SCN-022`）は、PH-07-2で追加する。
+（画面設計書 2.2）。このファイル1つで、一覧・詳細・登録編集の表示モードを
+`st.session_state` で切り替える。確認ダイアログ・操作ログの記録は行わない
+（`SCN-022` は `SCD-020` の対象外）。
 """
 
+from datetime import date
 from pathlib import Path
 
 import streamlit as st
 
 from crm_g.application.employee import (
     DEFAULT_ENROLLMENT_STATUSES,
+    EMPLOYMENT_TYPES,
     ENROLLMENT_STATUSES,
+    GENDERS,
+    DuplicateEmailError,
+    DuplicateEmployeeNoError,
     Employee,
+    EmployeeInput,
+    EmployeeNotFoundError,
+    InvalidBirthDateError,
+    InvalidEmailFormatError,
+    InvalidEmploymentTypeError,
+    InvalidEnrollmentStatusError,
+    InvalidGenderError,
+    InvalidNameError,
+    InvalidRetireDateError,
+    create_employee,
     get_employee,
     list_bonuses,
     list_employees,
@@ -20,16 +36,20 @@ from crm_g.application.employee import (
     list_salary_history,
     list_salary_history_items,
     list_work_periods,
+    update_employee,
 )
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
-from crm_g.ui.components.messages import show_errors, show_unexpected_error
+from crm_g.ui.components.messages import show_errors, show_success, show_unexpected_error
 from crm_g.ui.components.view_log import record_view_if_newly_displayed
 
 _MODE_KEY = "employee_mode"
 _SELECTED_ID_KEY = "employee_selected_id"
 _SCREEN_NAME = "SCN-021"
 _VIEW_LOG_TABLES = ("salary_history", "salary_history_item", "bonus")
+_UNSELECTED = "未選択"
+_EMPLOYMENT_TYPE_OPTIONS = (_UNSELECTED, *EMPLOYMENT_TYPES)
+_GENDER_OPTIONS = (_UNSELECTED, *GENDERS)
 
 
 def _yen(amount: int) -> str:
@@ -52,6 +72,18 @@ def _go_to_list() -> None:
     st.rerun()
 
 
+def _go_to_new_employee_form() -> None:
+    st.session_state[_MODE_KEY] = "edit"
+    st.session_state.pop(_SELECTED_ID_KEY, None)
+    st.rerun()
+
+
+def _go_to_edit_employee_form(employee_id: int) -> None:
+    st.session_state[_SELECTED_ID_KEY] = employee_id
+    st.session_state[_MODE_KEY] = "edit"
+    st.rerun()
+
+
 def _render_list(db_path: Path) -> None:
     st.title("社員一覧")
 
@@ -65,6 +97,9 @@ def _render_list(db_path: Path) -> None:
 
     with open_connection(db_path) as connection:
         employees = list_employees(connection, tuple(statuses), search)
+
+    if st.button("社員を登録", key="employee_open_register"):
+        _go_to_new_employee_form()
 
     if not employees:
         st.info("該当する社員がいません。")
@@ -238,8 +273,12 @@ def _render_detail(db_path: Path, employee_id: int) -> None:
             return
 
     st.title("社員詳細")
-    if st.button("一覧へ戻る", key="employee_back_to_list"):
+    back_column, edit_column = st.columns(2)
+    if back_column.button("一覧へ戻る", key="employee_back_to_list"):
         _go_to_list()
+        return
+    if edit_column.button("編集", key="employee_open_edit"):
+        _go_to_edit_employee_form(employee_id)
         return
 
     _render_basic_info(employee)
@@ -255,12 +294,219 @@ def _render_detail(db_path: Path, employee_id: int) -> None:
         _render_bonus_tab(db_path, employee_id)
 
 
+def _option_index(options: tuple[str, ...], value: str | None) -> int:
+    if value is None or value not in options:
+        return 0
+    return options.index(value)
+
+
+def _render_form_fields(existing: Employee | None, key_suffix: str) -> tuple[str, bool]:
+    """フォームの各項目を描画し、メールアドレスの入力値と送信の有無を返す。
+
+    メールアドレス以外の項目は、送信後に `st.session_state` 経由（同じkeyの
+    ウィジェット）で読み直すため、ここでは返さない。
+    """
+    with st.form(f"employee_form_{key_suffix}"):
+        if existing is None:
+            email_input = st.text_input("メールアドレス", key=f"employee_email_{key_suffix}")
+        else:
+            st.text_input(
+                "メールアドレス",
+                value=existing.email,
+                disabled=True,
+                key=f"employee_email_{key_suffix}",
+            )
+            email_input = existing.email
+
+        st.text_input(
+            "氏名", value=existing.name if existing else "", key=f"employee_name_{key_suffix}"
+        )
+        st.text_input(
+            "氏名（カナ）",
+            value=existing.name_kana if existing else "",
+            key=f"employee_name_kana_{key_suffix}",
+        )
+        st.text_input(
+            "社員番号",
+            value=existing.employee_no if existing else "",
+            key=f"employee_no_{key_suffix}",
+        )
+        st.selectbox(
+            "雇用形態",
+            _EMPLOYMENT_TYPE_OPTIONS,
+            index=_option_index(
+                _EMPLOYMENT_TYPE_OPTIONS, existing.employment_type if existing else None
+            ),
+            key=f"employee_employment_type_{key_suffix}",
+        )
+        st.date_input(
+            "生年月日",
+            value=existing.birth_date if existing else None,
+            key=f"employee_birth_date_{key_suffix}",
+        )
+        st.selectbox(
+            "性別",
+            _GENDER_OPTIONS,
+            index=_option_index(_GENDER_OPTIONS, existing.gender if existing else None),
+            key=f"employee_gender_{key_suffix}",
+        )
+        st.date_input(
+            "入社日",
+            value=existing.join_date if existing else None,
+            key=f"employee_join_date_{key_suffix}",
+        )
+        st.text_input(
+            "最寄駅",
+            value=existing.nearest_station if existing else "",
+            key=f"employee_station_{key_suffix}",
+        )
+        st.text_input(
+            "居住エリア",
+            value=existing.residence_area if existing else "",
+            key=f"employee_residence_{key_suffix}",
+        )
+        st.text_input(
+            "職種（例：PG、SE、PMO）",
+            value=existing.job_type if existing else "",
+            key=f"employee_job_type_{key_suffix}",
+        )
+        st.selectbox(
+            "在籍ステータス",
+            ENROLLMENT_STATUSES,
+            index=_option_index(
+                ENROLLMENT_STATUSES, existing.enrollment_status if existing else None
+            ),
+            key=f"employee_enrollment_status_{key_suffix}",
+        )
+        st.date_input(
+            "退職日",
+            value=existing.retire_date if existing else None,
+            key=f"employee_retire_date_{key_suffix}",
+        )
+        submitted = st.form_submit_button("保存", key=f"employee_submit_{key_suffix}")
+
+    return email_input, submitted
+
+
+def _build_employee_input(
+    email_input: str, key_suffix: str, *, is_new: bool
+) -> EmployeeInput | None:
+    """送信済みのウィジェットの値を、`st.session_state` から読み直して組み立てる。
+
+    必須項目が空のときは、エラーを表示して `None` を返す。
+    """
+    name = st.session_state[f"employee_name_{key_suffix}"]
+    join_date = st.session_state[f"employee_join_date_{key_suffix}"]
+
+    if is_new and not email_input:
+        show_errors(["メールアドレスを入力してください"])
+        return None
+    if not name:
+        show_errors(["氏名を入力してください"])
+        return None
+    if not isinstance(join_date, date):
+        show_errors(["入社日を入力してください"])
+        return None
+
+    employment_type = st.session_state[f"employee_employment_type_{key_suffix}"]
+    gender = st.session_state[f"employee_gender_{key_suffix}"]
+    birth_date = st.session_state[f"employee_birth_date_{key_suffix}"]
+    retire_date = st.session_state[f"employee_retire_date_{key_suffix}"]
+
+    return EmployeeInput(
+        email=email_input,
+        name=name,
+        name_kana=st.session_state[f"employee_name_kana_{key_suffix}"] or None,
+        employee_no=st.session_state[f"employee_no_{key_suffix}"] or None,
+        employment_type=employment_type if employment_type != _UNSELECTED else None,
+        birth_date=birth_date if isinstance(birth_date, date) else None,
+        gender=gender if gender != _UNSELECTED else None,
+        join_date=join_date,
+        nearest_station=st.session_state[f"employee_station_{key_suffix}"] or None,
+        residence_area=st.session_state[f"employee_residence_{key_suffix}"] or None,
+        job_type=st.session_state[f"employee_job_type_{key_suffix}"] or None,
+        enrollment_status=st.session_state[f"employee_enrollment_status_{key_suffix}"],
+        retire_date=retire_date if isinstance(retire_date, date) else None,
+    )
+
+
+def _save_employee(db_path: Path, employee_id: int | None, data: EmployeeInput) -> int | None:
+    """社員を登録・変更する。失敗したときは、エラーを表示して`None`を返す。"""
+    with open_connection(db_path) as connection:
+        try:
+            if employee_id is None:
+                return create_employee(connection, data)
+            update_employee(connection, employee_id, data)
+        except (
+            InvalidEmailFormatError,
+            DuplicateEmailError,
+            InvalidNameError,
+            DuplicateEmployeeNoError,
+            InvalidEmploymentTypeError,
+            InvalidGenderError,
+            InvalidEnrollmentStatusError,
+            InvalidBirthDateError,
+            InvalidRetireDateError,
+            EmployeeNotFoundError,
+        ) as error:
+            show_errors([str(error)])
+            return None
+        except Exception:
+            show_unexpected_error()
+            return None
+    return employee_id
+
+
+def _render_employee_form(db_path: Path, employee_id: int | None) -> None:
+    is_new = employee_id is None
+    existing: Employee | None = None
+    if employee_id is not None:
+        with open_connection(db_path) as connection:
+            existing = get_employee(connection, employee_id)
+        if existing is None:
+            show_errors(["社員が見つかりません。"])
+            _go_to_list()
+            return
+
+    # ウィジェットのkeyに対象（新規または社員ID）を含める。固定keyのままだと、
+    # 対象を切り替えてもフォームの内容が前回のまま残る（PH-06-3で見つかった
+    # 不具合と同じ原因）。
+    key_suffix = "new" if is_new else str(employee_id)
+
+    st.title("社員の登録" if is_new else "社員の編集")
+
+    email_input, submitted = _render_form_fields(existing, key_suffix)
+
+    if st.button("キャンセル", key=f"employee_cancel_{key_suffix}"):
+        if is_new:
+            _go_to_list()
+        else:
+            _go_to_detail(employee_id)  # type: ignore[arg-type]
+        return
+
+    if not submitted:
+        return
+
+    data = _build_employee_input(email_input, key_suffix, is_new=is_new)
+    if data is None:
+        return
+
+    saved_id = _save_employee(db_path, employee_id, data)
+    if saved_id is None:
+        return
+
+    show_success("登録しました" if is_new else "変更しました")
+    _go_to_detail(saved_id)
+
+
 def render() -> None:
     db_path = get_app_paths().db_path
     mode = st.session_state.get(_MODE_KEY, "list")
     selected_id = st.session_state.get(_SELECTED_ID_KEY)
 
-    if mode == "detail" and selected_id is not None:
+    if mode == "edit":
+        _render_employee_form(db_path, selected_id)
+    elif mode == "detail" and selected_id is not None:
         _render_detail(db_path, selected_id)
     else:
         _render_list(db_path)
