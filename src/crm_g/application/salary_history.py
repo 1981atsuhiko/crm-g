@@ -99,6 +99,24 @@ class RegistrationResult:
     previous_effective_to: date | None
 
 
+@dataclass(frozen=True)
+class RaiseRow:
+    """昇給一覧の1行（`SCN-031`）。
+
+    昇給額は、新しい月給合計から直前の履歴の月給合計を引いた値（`CLC-016`）。
+    直前の履歴が無いときは、`previous_monthly_salary`・`raise_amount` ともに
+    `None`（画面では「－」と表示する）。
+    """
+
+    employee_name: str
+    effective_from: date
+    revision_type: str
+    pay_system: str
+    previous_monthly_salary: int | None
+    monthly_salary: int
+    raise_amount: int | None
+
+
 def get_current_salary_history(
     connection: sqlite3.Connection, employee_id: int
 ) -> CurrentSalaryHistory | None:
@@ -253,3 +271,64 @@ def register_salary_history(
         monthly_salary=monthly_salary,
         previous_effective_to=previous_effective_to,
     )
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def list_raises(
+    connection: sqlite3.Connection, period_start: date, period_end: date, search: str = ""
+) -> tuple[RaiseRow, ...]:
+    """指定した期間に適用開始日がある昇給を、適用開始日の降順で返す（`SCN-031`）。
+
+    直前の履歴が無い行は、`previous_monthly_salary`・`raise_amount` ともに
+    `None`（`CLC-016`）。月給合計は保存せず、都度内訳の合計から求める
+    （`REQ-DAT-009`、`get_current_salary_history`と同様の方針）。
+    """
+    query = (
+        "WITH previous AS ("
+        "  SELECT h.id AS history_id, ("
+        "    SELECT h2.id FROM salary_history h2"
+        "    WHERE h2.employee_id = h.employee_id AND h2.effective_from < h.effective_from"
+        "    ORDER BY h2.effective_from DESC LIMIT 1"
+        "  ) AS previous_id"
+        "  FROM salary_history h"
+        ") "
+        "SELECT e.name, h.effective_from, h.revision_type, h.pay_system, "
+        "COALESCE((SELECT SUM(i.amount) FROM salary_history_item i "
+        "WHERE i.salary_history_id = h.id), 0) AS monthly_salary, "
+        "CASE WHEN p.previous_id IS NULL THEN NULL "
+        "ELSE COALESCE((SELECT SUM(i2.amount) FROM salary_history_item i2 "
+        "WHERE i2.salary_history_id = p.previous_id), 0) END AS previous_monthly_salary "
+        "FROM salary_history h "
+        "JOIN employee e ON e.id = h.employee_id "
+        "JOIN previous p ON p.history_id = h.id "
+        "WHERE h.effective_from BETWEEN ? AND ?"
+    )
+    params: list[object] = [period_start.isoformat(), period_end.isoformat()]
+    if search:
+        query += " AND e.name LIKE ? ESCAPE '\\'"
+        params.append(f"%{_escape_like(search)}%")
+    query += " ORDER BY h.effective_from DESC"
+
+    rows = connection.execute(query, params).fetchall()
+    result = []
+    for row in rows:
+        previous_monthly_salary = row[5]
+        monthly_salary = row[4]
+        raise_amount = None
+        if previous_monthly_salary is not None:
+            raise_amount = monthly_salary - previous_monthly_salary
+        result.append(
+            RaiseRow(
+                employee_name=row[0],
+                effective_from=date.fromisoformat(row[1]),
+                revision_type=row[2],
+                pay_system=row[3],
+                previous_monthly_salary=previous_monthly_salary,
+                monthly_salary=monthly_salary,
+                raise_amount=raise_amount,
+            )
+        )
+    return tuple(result)

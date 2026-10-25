@@ -1,8 +1,10 @@
 """期・半期の判定の試験（TC-CLC-011）。"""
 
+from datetime import date
+
 import pytest
 
-from crm_g.domain.period import fiscal_half
+from crm_g.domain.period import fiscal_half, fiscal_year_date_range, half_date_range
 
 
 @pytest.mark.parametrize(
@@ -31,3 +33,20 @@ def test_tc_clc_011_fiscal_half_examples(  # noqa: PLR0913, PLR0917
 def test_fiscal_half_rejects_invalid_month() -> None:
     with pytest.raises(ValueError, match="month"):
         fiscal_half(2026, 13)
+
+
+def test_half_date_range_first_half() -> None:
+    assert half_date_range(2026, 1) == (date(2026, 4, 1), date(2026, 9, 30))
+
+
+def test_half_date_range_second_half() -> None:
+    assert half_date_range(2026, 2) == (date(2026, 10, 1), date(2027, 3, 31))
+
+
+def test_half_date_range_rejects_invalid_half() -> None:
+    with pytest.raises(ValueError, match="half"):
+        half_date_range(2026, 3)
+
+
+def test_fiscal_year_date_range() -> None:
+    assert fiscal_year_date_range(2026) == (date(2026, 4, 1), date(2027, 3, 31))
