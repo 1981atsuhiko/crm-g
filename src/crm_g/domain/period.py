@@ -1,6 +1,7 @@
 """期・半期の判定（CLC-002）。"""
 
 from dataclasses import dataclass
+from datetime import date
 
 _FISCAL_YEAR_BASE = 2006
 
@@ -36,3 +37,17 @@ def fiscal_half(year: int, month: int) -> FiscalHalf:
     return FiscalHalf(
         fiscal_year=fiscal_year, period=period, half_name=half_name, half_code=half_code
     )
+
+
+def half_date_range(fiscal_year: int, half: int) -> tuple[date, date]:
+    """年度・半期（1または2）から、開始日・終了日を求める（CLC-002、`SCN-031`）。"""
+    if half == 1:
+        return date(fiscal_year, 4, 1), date(fiscal_year, 9, 30)
+    if half == 2:
+        return date(fiscal_year, 10, 1), date(fiscal_year + 1, 3, 31)
+    raise ValueError("half は1または2で指定してください")
+
+
+def fiscal_year_date_range(fiscal_year: int) -> tuple[date, date]:
+    """年度（通期）から、開始日・終了日を求める（CLC-002、`SCN-031`）。"""
+    return date(fiscal_year, 4, 1), date(fiscal_year + 1, 3, 31)

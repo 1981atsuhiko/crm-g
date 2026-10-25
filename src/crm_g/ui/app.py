@@ -25,6 +25,7 @@ _CALCULATION_SETTING_PATH = "calculation_setting"
 _BONUS_RULE_PATH = "bonus_rule"
 _EMPLOYEE_PATH = "employee"
 _SALARY_HISTORY_PATH = "salary_history"
+_RAISE_LIST_PATH = "raise_list"
 
 
 def _is_passcode_set() -> bool:
@@ -52,6 +53,7 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
         "社員": [_page("employee.py", _EMPLOYEE_PATH, title="社員")],
         "給与": [
             _page("salary_history.py", _SALARY_HISTORY_PATH, title="給与履歴の登録"),
+            _page("raise_list.py", _RAISE_LIST_PATH, title="昇給一覧"),
         ],
         "設定": [
             _page("business_calendar.py", _BUSINESS_CALENDAR_PATH, title="営業日カレンダー"),
