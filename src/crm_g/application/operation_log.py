@@ -8,6 +8,7 @@
 
 import json
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -39,6 +40,14 @@ class OperationLogDetail:
     detail: str | None = None
     before_value: dict[str, Any] | None = None
     after_value: dict[str, Any] | None = None
+
+
+def changed_values(
+    before: Mapping[str, Any], after: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """`更新` の記録用に、値が変わった列だけを、変更前・変更後の組にして返す（`SCD-020`）。"""
+    keys = [key for key in after if before.get(key) != after[key]]
+    return {key: before.get(key) for key in keys}, {key: after[key] for key in keys}
 
 
 def record_operation_log(

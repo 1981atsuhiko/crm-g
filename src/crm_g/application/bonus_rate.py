@@ -11,6 +11,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
+from crm_g.application.operation_log import (
+    Operation,
+    OperationLogDetail,
+    record_operation_log,
+)
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
 
@@ -84,17 +89,64 @@ def save_rates(
     now = to_iso8601(utc_now())
     with transaction(connection):
         for rank, rate_bp in parsed.items():
-            if rate_bp is None:
-                connection.execute(
-                    "DELETE FROM bonus_rate WHERE eval_half = ? AND eval_rank = ?",
-                    (eval_half, rank),
-                )
-            else:
-                connection.execute(
-                    "INSERT INTO bonus_rate "
-                    "(eval_half, eval_rank, rate_bp, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?) "
-                    "ON CONFLICT (eval_half, eval_rank) DO UPDATE SET "
-                    "rate_bp = excluded.rate_bp, updated_at = excluded.updated_at",
-                    (eval_half, rank, rate_bp, now, now),
-                )
+            _save_rate(connection, eval_half, rank, rate_bp, now)
+
+
+def _save_rate(
+    connection: sqlite3.Connection, eval_half: str, rank: str, rate_bp: int | None, now: str
+) -> None:
+    """1つの評価ランクの掛け率を保存し、変わったときだけ操作ログに記録する（`SCD-020`）。"""
+    existing = connection.execute(
+        "SELECT rate_bp FROM bonus_rate WHERE eval_half = ? AND eval_rank = ?",
+        (eval_half, rank),
+    ).fetchone()
+    current_bp = existing[0] if existing is not None else None
+    if rate_bp == current_bp:
+        return
+
+    target_key = f"{eval_half}:{rank}"
+    if rate_bp is None:
+        connection.execute(
+            "DELETE FROM bonus_rate WHERE eval_half = ? AND eval_rank = ?",
+            (eval_half, rank),
+        )
+        record_operation_log(
+            connection,
+            Operation.DELETE,
+            "bonus_rate",
+            OperationLogDetail(
+                target_key=target_key,
+                before_value={"eval_half": eval_half, "eval_rank": rank, "rate_bp": current_bp},
+            ),
+        )
+        return
+
+    connection.execute(
+        "INSERT INTO bonus_rate "
+        "(eval_half, eval_rank, rate_bp, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT (eval_half, eval_rank) DO UPDATE SET "
+        "rate_bp = excluded.rate_bp, updated_at = excluded.updated_at",
+        (eval_half, rank, rate_bp, now, now),
+    )
+    if current_bp is None:
+        record_operation_log(
+            connection,
+            Operation.CREATE,
+            "bonus_rate",
+            OperationLogDetail(
+                target_key=target_key,
+                after_value={"eval_half": eval_half, "eval_rank": rank, "rate_bp": rate_bp},
+            ),
+        )
+    else:
+        record_operation_log(
+            connection,
+            Operation.UPDATE,
+            "bonus_rate",
+            OperationLogDetail(
+                target_key=target_key,
+                before_value={"rate_bp": current_bp},
+                after_value={"rate_bp": rate_bp},
+            ),
+        )

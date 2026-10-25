@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
+from crm_g.application.operation_log import Operation, OperationLogDetail, record_operation_log
 from crm_g.domain.period_overlap import periods_overlap
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
@@ -154,10 +155,34 @@ def change_rate(
                     current.valid_from.isoformat(),
                 ),
             )
+            record_operation_log(
+                connection,
+                Operation.UPDATE,
+                "work_status_rate",
+                OperationLogDetail(
+                    target_key=f"{work_status_code}:{current.valid_from.isoformat()}",
+                    before_value={"valid_to": None},
+                    after_value={"valid_to": new_end.isoformat() if new_end else None},
+                ),
+            )
 
         connection.execute(
             "INSERT INTO work_status_rate "
             "(work_status_code, valid_from, valid_to, payroll_rate_bp, created_at, updated_at) "
             "VALUES (?, ?, NULL, ?, ?, ?)",
             (work_status_code, valid_from.isoformat(), new_rate_bp, now, now),
+        )
+        record_operation_log(
+            connection,
+            Operation.CREATE,
+            "work_status_rate",
+            OperationLogDetail(
+                target_key=f"{work_status_code}:{valid_from.isoformat()}",
+                after_value={
+                    "work_status_code": work_status_code,
+                    "valid_from": valid_from.isoformat(),
+                    "valid_to": None,
+                    "payroll_rate_bp": new_rate_bp,
+                },
+            ),
         )

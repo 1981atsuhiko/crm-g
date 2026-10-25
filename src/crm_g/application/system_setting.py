@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
+from crm_g.application.operation_log import Operation, OperationLogDetail, record_operation_log
 from crm_g.domain.period_overlap import periods_overlap
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
@@ -125,10 +126,34 @@ def change_coefficient(connection: sqlite3.Connection, coefficient: str, valid_f
                     current.valid_from.isoformat(),
                 ),
             )
+            record_operation_log(
+                connection,
+                Operation.UPDATE,
+                "system_setting",
+                OperationLogDetail(
+                    target_key=f"{_COST_COEFFICIENT_KEY}:{current.valid_from.isoformat()}",
+                    before_value={"valid_to": None},
+                    after_value={"valid_to": new_end.isoformat() if new_end else None},
+                ),
+            )
 
         connection.execute(
             "INSERT INTO system_setting "
             "(setting_key, valid_from, valid_to, value_integer, created_at, updated_at) "
             "VALUES (?, ?, NULL, ?, ?, ?)",
             (_COST_COEFFICIENT_KEY, valid_from.isoformat(), new_coefficient_bp, now, now),
+        )
+        record_operation_log(
+            connection,
+            Operation.CREATE,
+            "system_setting",
+            OperationLogDetail(
+                target_key=f"{_COST_COEFFICIENT_KEY}:{valid_from.isoformat()}",
+                after_value={
+                    "setting_key": _COST_COEFFICIENT_KEY,
+                    "valid_from": valid_from.isoformat(),
+                    "valid_to": None,
+                    "value_integer": new_coefficient_bp,
+                },
+            ),
         )
