@@ -3,6 +3,10 @@
 祝日は `infrastructure.holidays` から取得する。土日と祝日を非営業日とし、
 `source` を `自動取込` にする。会社休日など、画面から登録した日は `手動登録` に
 なり、祝日の再取込では上書きしない。
+
+変更は、操作ログに記録する（`SCD-020`）。年の作成は、365日分の行を1回の操作で
+作るため、1年につき `登録` を1件だけ記録する（`target_key` は年、`detail` は件数）。
+祝日の再取込は、値が変わった日だけを、日ごとに `更新` として記録する。
 """
 
 import calendar
@@ -10,6 +14,12 @@ import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として�
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+from crm_g.application.operation_log import (
+    Operation,
+    OperationLogDetail,
+    changed_values,
+    record_operation_log,
+)
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
 from crm_g.infrastructure.holidays import year_holidays
@@ -51,6 +61,7 @@ def create_year_calendar(connection: sqlite3.Connection, year: int) -> None:
 
         holidays = year_holidays(year)
         now = to_iso8601(utc_now())
+        days = _dates_in_year(year)
         connection.executemany(
             "INSERT INTO business_calendar "
             "(calendar_date, is_business_day, source, created_at, updated_at) "
@@ -63,8 +74,14 @@ def create_year_calendar(connection: sqlite3.Connection, year: int) -> None:
                     now,
                     now,
                 )
-                for day in _dates_in_year(year)
+                for day in days
             ],
+        )
+        record_operation_log(
+            connection,
+            Operation.CREATE,
+            "business_calendar",
+            OperationLogDetail(target_key=str(year), detail=f"{len(days)}件"),
         )
 
 
@@ -73,19 +90,32 @@ def refetch_holidays(connection: sqlite3.Connection, year: int) -> None:
     with transaction(connection):
         holidays = year_holidays(year)
         now = to_iso8601(utc_now())
-        connection.executemany(
-            "UPDATE business_calendar SET is_business_day = ?, updated_at = ? "
-            "WHERE calendar_date = ? AND source = ?",
-            [
-                (
-                    int(_is_expected_business_day(day, holidays)),
-                    now,
-                    day.isoformat(),
-                    _SOURCE_AUTOMATIC,
-                )
-                for day in _dates_in_year(year)
-            ],
-        )
+        rows = connection.execute(
+            "SELECT calendar_date, is_business_day FROM business_calendar "
+            "WHERE calendar_date BETWEEN ? AND ? AND source = ? ORDER BY calendar_date",
+            (date(year, 1, 1).isoformat(), date(year, 12, 31).isoformat(), _SOURCE_AUTOMATIC),
+        ).fetchall()
+        for calendar_date, current_value in rows:
+            expected_value = int(
+                _is_expected_business_day(date.fromisoformat(calendar_date), holidays)
+            )
+            if expected_value == current_value:
+                continue
+            connection.execute(
+                "UPDATE business_calendar SET is_business_day = ?, updated_at = ? "
+                "WHERE calendar_date = ? AND source = ?",
+                (expected_value, now, calendar_date, _SOURCE_AUTOMATIC),
+            )
+            record_operation_log(
+                connection,
+                Operation.UPDATE,
+                "business_calendar",
+                OperationLogDetail(
+                    target_key=calendar_date,
+                    before_value={"is_business_day": current_value},
+                    after_value={"is_business_day": expected_value},
+                ),
+            )
 
 
 def register_manual_day(
@@ -93,7 +123,12 @@ def register_manual_day(
 ) -> None:
     """日を手動で登録する（会社休日、土曜の出勤など）。登録した日は`手動登録`になる。"""
     now = to_iso8601(utc_now())
+    values = {"is_business_day": int(is_business_day), "source": _SOURCE_MANUAL, "note": note}
     with transaction(connection):
+        existing = connection.execute(
+            "SELECT is_business_day, source, note FROM business_calendar WHERE calendar_date = ?",
+            (day.isoformat(),),
+        ).fetchone()
         connection.execute(
             "INSERT INTO business_calendar "
             "(calendar_date, is_business_day, source, note, created_at, updated_at) "
@@ -103,8 +138,28 @@ def register_manual_day(
             "source = excluded.source, "
             "note = excluded.note, "
             "updated_at = excluded.updated_at",
-            (day.isoformat(), int(is_business_day), _SOURCE_MANUAL, note, now, now),
+            (day.isoformat(), values["is_business_day"], values["source"], note, now, now),
         )
+        if existing is None:
+            record_operation_log(
+                connection,
+                Operation.CREATE,
+                "business_calendar",
+                OperationLogDetail(target_key=day.isoformat(), after_value=values),
+            )
+            return
+        before_value, after_value = changed_values(
+            dict(zip(("is_business_day", "source", "note"), existing, strict=True)), values
+        )
+        if after_value:
+            record_operation_log(
+                connection,
+                Operation.UPDATE,
+                "business_calendar",
+                OperationLogDetail(
+                    target_key=day.isoformat(), before_value=before_value, after_value=after_value
+                ),
+            )
 
 
 @dataclass(frozen=True)

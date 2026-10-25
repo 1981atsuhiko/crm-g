@@ -1,15 +1,22 @@
 """社員（`SCN-020`、`SCN-021`、`SCN-022`、`TBL-001`）。
 
 一覧・詳細の閲覧（PH-07-1）に加え、登録・編集（PH-07-2）をまとめる。登録・
-編集は、操作ログの対象外とする。給与・賞与の項目を含まないため（`SCD-020`）。
-再計算の接続はPH-10で行う。
+編集は、`登録`・`更新` として操作ログに記録する（`SCD-020`）。再計算の接続は
+PH-10で行う。
 """
 
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
+from typing import Any
 
+from crm_g.application.operation_log import (
+    Operation,
+    OperationLogDetail,
+    changed_values,
+    record_operation_log,
+)
 from crm_g.domain.email_format import is_valid_email_format
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
@@ -415,6 +422,39 @@ def _check_duplicate_employee_no(
         raise DuplicateEmployeeNoError(f"社員番号 {employee_no} は、既に使われています")
 
 
+_EDITABLE_COLUMNS = (
+    "name",
+    "name_kana",
+    "employee_no",
+    "employment_type",
+    "birth_date",
+    "gender",
+    "join_date",
+    "nearest_station",
+    "residence_area",
+    "job_type",
+    "enrollment_status",
+    "retire_date",
+)
+
+
+def _editable_values(data: EmployeeInput) -> dict[str, Any]:
+    return {
+        "name": data.name,
+        "name_kana": data.name_kana,
+        "employee_no": data.employee_no,
+        "employment_type": data.employment_type,
+        "birth_date": data.birth_date.isoformat() if data.birth_date else None,
+        "gender": data.gender,
+        "join_date": data.join_date.isoformat(),
+        "nearest_station": data.nearest_station,
+        "residence_area": data.residence_area,
+        "job_type": data.job_type,
+        "enrollment_status": data.enrollment_status,
+        "retire_date": data.retire_date.isoformat() if data.retire_date else None,
+    }
+
+
 def create_employee(connection: sqlite3.Connection, data: EmployeeInput) -> int:
     """社員を、新しいメールアドレスで登録する（`SCN-022`）。登録したIDを返す。"""
     email = data.email.strip().lower()
@@ -428,32 +468,23 @@ def create_employee(connection: sqlite3.Connection, data: EmployeeInput) -> int:
         _check_duplicate_employee_no(connection, data.employee_no, exclude_id=None)
 
         now = to_iso8601(utc_now())
+        values = {"email": email, **_editable_values(data)}
         cursor = connection.execute(
             "INSERT INTO employee "
             "(email, name, name_kana, employee_no, employment_type, birth_date, gender, "
             "join_date, nearest_station, residence_area, job_type, enrollment_status, "
             "retire_date, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                email,
-                data.name,
-                data.name_kana,
-                data.employee_no,
-                data.employment_type,
-                data.birth_date.isoformat() if data.birth_date else None,
-                data.gender,
-                data.join_date.isoformat(),
-                data.nearest_station,
-                data.residence_area,
-                data.job_type,
-                data.enrollment_status,
-                data.retire_date.isoformat() if data.retire_date else None,
-                now,
-                now,
-            ),
+            (*values.values(), now, now),
         )
         new_id = cursor.lastrowid
         assert new_id is not None  # noqa: S101 AUTOINCREMENT主キーのINSERT直後のため必ず取得できる
+        record_operation_log(
+            connection,
+            Operation.CREATE,
+            "employee",
+            OperationLogDetail(target_key=str(new_id), after_value=values),
+        )
 
     return new_id
 
@@ -463,33 +494,36 @@ def update_employee(connection: sqlite3.Connection, employee_id: int, data: Empl
     _validate_employee_fields(data)
 
     with transaction(connection):
-        if (
-            connection.execute("SELECT 1 FROM employee WHERE id = ?", (employee_id,)).fetchone()
-            is None
-        ):
+        row = connection.execute(
+            "SELECT name, name_kana, employee_no, employment_type, birth_date, gender, "
+            "join_date, nearest_station, residence_area, job_type, enrollment_status, "
+            "retire_date FROM employee WHERE id = ?",
+            (employee_id,),
+        ).fetchone()
+        if row is None:
             raise EmployeeNotFoundError(f"社員（id={employee_id}）が見つかりません")
         _check_duplicate_employee_no(connection, data.employee_no, exclude_id=employee_id)
 
+        values = _editable_values(data)
         now = to_iso8601(utc_now())
         connection.execute(
             "UPDATE employee SET name = ?, name_kana = ?, employee_no = ?, "
             "employment_type = ?, birth_date = ?, gender = ?, join_date = ?, "
             "nearest_station = ?, residence_area = ?, job_type = ?, "
             "enrollment_status = ?, retire_date = ?, updated_at = ? WHERE id = ?",
-            (
-                data.name,
-                data.name_kana,
-                data.employee_no,
-                data.employment_type,
-                data.birth_date.isoformat() if data.birth_date else None,
-                data.gender,
-                data.join_date.isoformat(),
-                data.nearest_station,
-                data.residence_area,
-                data.job_type,
-                data.enrollment_status,
-                data.retire_date.isoformat() if data.retire_date else None,
-                now,
-                employee_id,
-            ),
+            (*values.values(), now, employee_id),
         )
+        before_value, after_value = changed_values(
+            dict(zip(_EDITABLE_COLUMNS, row, strict=True)), values
+        )
+        if after_value:
+            record_operation_log(
+                connection,
+                Operation.UPDATE,
+                "employee",
+                OperationLogDetail(
+                    target_key=str(employee_id),
+                    before_value=before_value,
+                    after_value=after_value,
+                ),
+            )

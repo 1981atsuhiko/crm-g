@@ -10,6 +10,12 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from crm_g.application.operation_log import (
+    Operation,
+    OperationLogDetail,
+    changed_values,
+    record_operation_log,
+)
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
 
@@ -143,6 +149,31 @@ def _validate(
             raise InvalidDeductionOrderError("減額順は、他の給与項目と重複できません")
 
 
+_PAY_ITEM_COLUMNS = (
+    "name",
+    "category",
+    "in_monthly_salary",
+    "cost_direct",
+    "deduction_order",
+    "sort_order",
+    "valid_from",
+    "valid_to",
+)
+
+
+def _pay_item_values(data: PayItemInput) -> dict[str, object]:
+    return {
+        "name": data.name,
+        "category": data.category,
+        "in_monthly_salary": int(data.in_monthly_salary),
+        "cost_direct": int(data.cost_direct),
+        "deduction_order": data.deduction_order,
+        "sort_order": data.sort_order,
+        "valid_from": data.valid_from.isoformat(),
+        "valid_to": data.valid_to.isoformat() if data.valid_to else None,
+    }
+
+
 def create_pay_item(connection: sqlite3.Connection, code: str, data: PayItemInput) -> None:
     """給与項目を、新しいコードで追加する（`SCN-062`）。"""
     if not _CODE_PATTERN.fullmatch(code):
@@ -155,50 +186,52 @@ def create_pay_item(connection: sqlite3.Connection, code: str, data: PayItemInpu
         _validate(connection, data, exclude_code=None)
 
         now = to_iso8601(utc_now())
+        values = _pay_item_values(data)
         connection.execute(
             "INSERT INTO pay_item "
             "(code, name, category, in_monthly_salary, cost_direct, deduction_order, "
             "sort_order, valid_from, valid_to, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                code,
-                data.name,
-                data.category,
-                int(data.in_monthly_salary),
-                int(data.cost_direct),
-                data.deduction_order,
-                data.sort_order,
-                data.valid_from.isoformat(),
-                data.valid_to.isoformat() if data.valid_to else None,
-                now,
-                now,
-            ),
+            (code, *values.values(), now, now),
+        )
+        record_operation_log(
+            connection,
+            Operation.CREATE,
+            "pay_item",
+            OperationLogDetail(target_key=code, after_value={"code": code, **values}),
         )
 
 
 def update_pay_item(connection: sqlite3.Connection, code: str, data: PayItemInput) -> None:
     """既存の給与項目を変更する（`SCN-062`）。コード自体は変更できない。"""
     with transaction(connection):
-        if not connection.execute("SELECT 1 FROM pay_item WHERE code = ?", (code,)).fetchone():
+        row = connection.execute(
+            "SELECT name, category, in_monthly_salary, cost_direct, deduction_order, "
+            "sort_order, valid_from, valid_to FROM pay_item WHERE code = ?",
+            (code,),
+        ).fetchone()
+        if row is None:
             raise CodeNotFoundError(f"コード {code} の給与項目が見つかりません")
 
         _validate(connection, data, exclude_code=code)
 
         now = to_iso8601(utc_now())
+        values = _pay_item_values(data)
         connection.execute(
             "UPDATE pay_item SET name = ?, category = ?, in_monthly_salary = ?, "
             "cost_direct = ?, deduction_order = ?, sort_order = ?, valid_from = ?, "
             "valid_to = ?, updated_at = ? WHERE code = ?",
-            (
-                data.name,
-                data.category,
-                int(data.in_monthly_salary),
-                int(data.cost_direct),
-                data.deduction_order,
-                data.sort_order,
-                data.valid_from.isoformat(),
-                data.valid_to.isoformat() if data.valid_to else None,
-                now,
-                code,
-            ),
+            (*values.values(), now, code),
         )
+        before_value, after_value = changed_values(
+            dict(zip(_PAY_ITEM_COLUMNS, row, strict=True)), values
+        )
+        if after_value:
+            record_operation_log(
+                connection,
+                Operation.UPDATE,
+                "pay_item",
+                OperationLogDetail(
+                    target_key=code, before_value=before_value, after_value=after_value
+                ),
+            )

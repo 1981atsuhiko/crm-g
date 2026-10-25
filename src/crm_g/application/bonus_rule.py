@@ -10,6 +10,7 @@ import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として�
 from dataclasses import dataclass
 from datetime import date, timedelta
 
+from crm_g.application.operation_log import Operation, OperationLogDetail, record_operation_log
 from crm_g.domain.period_overlap import periods_overlap
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
@@ -109,10 +110,34 @@ def add_bonus_rule(
                     current.valid_from.isoformat(),
                 ),
             )
+            record_operation_log(
+                connection,
+                Operation.UPDATE,
+                "bonus_rule",
+                OperationLogDetail(
+                    target_key=f"{target_pay_system}:{current.valid_from.isoformat()}",
+                    before_value={"valid_to": None},
+                    after_value={"valid_to": new_end.isoformat() if new_end else None},
+                ),
+            )
 
         connection.execute(
             "INSERT INTO bonus_rule "
             "(valid_from, valid_to, base_type, target_pay_system, created_at, updated_at) "
             "VALUES (?, NULL, ?, ?, ?, ?)",
             (valid_from.isoformat(), base_type, target_pay_system, now, now),
+        )
+        record_operation_log(
+            connection,
+            Operation.CREATE,
+            "bonus_rule",
+            OperationLogDetail(
+                target_key=f"{target_pay_system}:{valid_from.isoformat()}",
+                after_value={
+                    "valid_from": valid_from.isoformat(),
+                    "valid_to": None,
+                    "base_type": base_type,
+                    "target_pay_system": target_pay_system,
+                },
+            ),
         )
