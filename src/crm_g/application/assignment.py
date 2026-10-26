@@ -44,6 +44,10 @@ class InvalidPeriodError(RuntimeError):
     """終了日が、開始日より前のときのエラー。"""
 
 
+class RateOutsidePeriodError(RuntimeError):
+    """期間の変更で、この参画の単価の適用開始日が期間の外に出るときのエラー。"""
+
+
 @dataclass(frozen=True)
 class Assignment:
     """参画の1行。"""
@@ -167,6 +171,17 @@ def update_assignment(
             raise AssignmentNotFoundError(f"参画（id={assignment_id}）が見つかりません")
 
         values = _values(data)
+        # 単価の適用開始日は、参画の期間の中にする（データ設計書 10章 No.12）。
+        outside = connection.execute(
+            "SELECT 1 FROM rate_history WHERE assignment_id = ? "
+            "AND (effective_from < ? OR (? IS NOT NULL AND effective_from > ?))",
+            (assignment_id, values["start_date"], values["end_date"], values["end_date"]),
+        ).fetchone()
+        if outside is not None:
+            raise RateOutsidePeriodError(
+                "この参画の単価の適用開始日が、期間の外になります。先に単価を直してください"
+            )
+
         now = to_iso8601(utc_now())
         connection.execute(
             "UPDATE assignment SET customer_name = ?, project_name = ?, category = ?, "

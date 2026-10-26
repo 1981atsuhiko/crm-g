@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from crm_g.infrastructure.db import open_connection
-from crm_g.infrastructure.migration import apply_migrations
+from crm_g.infrastructure.migration import MigrationFailedError, apply_migrations
 
 _DDL_DIR = Path(__file__).resolve().parents[2] / "DDL"
 _TIMESTAMP = "2026-10-21T00:00:00.000000Z"
@@ -90,25 +90,93 @@ def test_work_period_defaults_billing_ratio_to_10000(db_path: Path) -> None:
         assert row[0] == 10000
 
 
-def test_rate_history_rejects_duplicate_employee_level_effective_from(db_path: Path) -> None:
-    """assignment_idがNULLの単価履歴は、COALESCEにより同じキーとして一意性が働く。"""
+def test_rate_history_rejects_null_assignment(db_path: Path) -> None:
+    """単価は、必ず参画に紐づく（DDL/023、データ設計書 DBD-018）。"""
     with open_connection(db_path) as connection:
         _insert_employee(connection, 1)
-        connection.execute(
-            "INSERT INTO rate_history (employee_id, effective_from, unit_price, "
-            "created_at, updated_at) "
-            "VALUES (1, '2026-10-01', 800000, ?, ?)",
-            (_TIMESTAMP, _TIMESTAMP),
-        )
-        connection.commit()
-
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
                 "INSERT INTO rate_history (employee_id, effective_from, unit_price, "
                 "created_at, updated_at) "
-                "VALUES (1, '2026-10-01', 850000, ?, ?)",
+                "VALUES (1, '2026-10-01', 800000, ?, ?)",
                 (_TIMESTAMP, _TIMESTAMP),
             )
+
+
+def _copy_ddl_until(target_dir: Path, last_version: int) -> None:
+    target_dir.mkdir()
+    for source in sorted(_DDL_DIR.glob("*.sql")):
+        if int(source.name.split("_", 1)[0]) <= last_version:
+            (target_dir / source.name).write_bytes(source.read_bytes())
+
+
+def test_migration_023_keeps_existing_rate_history(tmp_path: Path) -> None:
+    ddl_dir = tmp_path / "ddl"
+    _copy_ddl_until(ddl_dir, 22)
+    path = tmp_path / "old.db"
+    with open_connection(path) as connection:
+        apply_migrations(connection, ddl_dir, path, tmp_path / "backups")
+        _insert_employee(connection, 1)
+        connection.execute(
+            "INSERT INTO assignment "
+            "(id, employee_id, customer_name, category, start_date, created_at, updated_at) "
+            "VALUES (1, 1, '顧客A', 'SES', '2026-04-01', ?, ?)",
+            (_TIMESTAMP, _TIMESTAMP),
+        )
+        connection.execute(
+            "INSERT INTO rate_history "
+            "(id, employee_id, assignment_id, effective_from, unit_price, created_at, updated_at) "
+            "VALUES (7, 1, 1, '2026-04-01', 800000, ?, ?)",
+            (_TIMESTAMP, _TIMESTAMP),
+        )
+        connection.commit()
+
+        (ddl_dir / "023_require_rate_history_assignment.sql").write_bytes(
+            (_DDL_DIR / "023_require_rate_history_assignment.sql").read_bytes()
+        )
+        apply_migrations(connection, ddl_dir, path, tmp_path / "backups")
+
+        row = connection.execute(
+            "SELECT id, assignment_id, unit_price FROM rate_history"
+        ).fetchone()
+        assert row == (7, 1, 800000)
+
+
+def test_migration_023_fails_when_rate_history_without_assignment_remains(
+    tmp_path: Path,
+) -> None:
+    ddl_dir = tmp_path / "ddl"
+    _copy_ddl_until(ddl_dir, 22)
+    path = tmp_path / "old.db"
+    with open_connection(path) as connection:
+        apply_migrations(connection, ddl_dir, path, tmp_path / "backups")
+        _insert_employee(connection, 1)
+        connection.execute(
+            "INSERT INTO rate_history (employee_id, effective_from, unit_price, "
+            "created_at, updated_at) VALUES (1, '2026-04-01', 800000, ?, ?)",
+            (_TIMESTAMP, _TIMESTAMP),
+        )
+        connection.commit()
+
+        (ddl_dir / "023_require_rate_history_assignment.sql").write_bytes(
+            (_DDL_DIR / "023_require_rate_history_assignment.sql").read_bytes()
+        )
+        with pytest.raises(MigrationFailedError):
+            apply_migrations(connection, ddl_dir, path, tmp_path / "backups")
+        # 失敗したら、開いたままのトランザクションを残さない。
+        assert not connection.in_transaction
+
+    # 失敗した作り直しは取り消され、元の表と行がそのまま残る。
+    with open_connection(path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        count = connection.execute("SELECT COUNT(*) FROM rate_history").fetchone()[0]
+    assert "rate_history_new" not in tables
+    assert count == 1
 
 
 def test_forecast_rejects_undefined_confidence(db_path: Path) -> None:
