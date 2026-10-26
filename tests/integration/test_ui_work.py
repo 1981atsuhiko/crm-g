@@ -8,6 +8,7 @@ from streamlit.testing.v1 import AppTest
 
 from crm_g.application.assignment import AssignmentInput, create_assignment
 from crm_g.application.unit_price import RateHistoryInput, register_rate_history
+from crm_g.domain.period import current_fiscal_half
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.migration import apply_migrations
 
@@ -259,3 +260,118 @@ def test_shrinking_assignment_period_past_rate_shows_error(db_path: Path) -> Non
     app = app.run()
 
     assert any("先に単価を直してください" in error.value for error in app.error)
+
+
+# ---- 稼働期間タブ ----
+
+
+def _fill_period(
+    app: AppTest, start: date, status: str = "WAIT_FULL", end: date | None = None
+) -> None:
+    app.date_input(key="work_period_start_1_new").set_value(start)
+    if end is not None:
+        app.date_input(key="work_period_end_1_new").set_value(end)
+    app.selectbox(key="work_period_status_1_new").set_value(status)
+
+
+def test_period_tab_defaults_to_current_half(db_path: Path) -> None:
+    app = _new_app()
+
+    assert not app.exception
+    assert app.selectbox(key="work_period_half").value == current_fiscal_half(date.today())
+    assert app.selectbox(key="work_period_employee").value == 1
+
+
+def test_register_period_updates_grid_and_clears_inputs(db_path: Path) -> None:
+    app = _new_app()
+    _fill_period(app, date(2026, 10, 1))
+    app = app.run()
+    app.button(key="work_period_submit_1_new").click()
+    app = app.run()
+
+    assert not app.exception
+    assert any("稼働期間を登録しました" in toast.value for toast in app.toast)
+    with open_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT start_date, end_date, work_status_code, assignment_id, billing_ratio_bp "
+            "FROM work_period"
+        ).fetchone()
+    assert row == ("2026-10-01", None, "WAIT_FULL", None, 10000)
+    assert app.date_input(key="work_period_start_1_new").value is None
+
+
+def test_assignment_field_is_shown_only_for_billable_status(db_path: Path) -> None:
+    app = _new_app()
+    app.selectbox(key="work_period_status_1_new").set_value("WAIT_FULL")
+    app = app.run()
+    assert not [box for box in app.selectbox if box.key == "work_period_assignment_1_new"]
+
+    app.selectbox(key="work_period_status_1_new").set_value("DEV")
+    app = app.run()
+
+    assert app.selectbox(key="work_period_assignment_1_new").value is None
+
+
+def test_tc_scn_014_billable_status_without_assignment_shows_error(db_path: Path) -> None:
+    app = _new_app()
+    _fill_period(app, date(2026, 10, 1), status="DEV")
+    app = app.run()
+    app.button(key="work_period_submit_1_new").click()
+    app = app.run()
+
+    assert any("参画を選んでください" in error.value for error in app.error)
+    assert _count(db_path, "work_period") == 0
+
+
+def test_register_billable_period_with_assignment(db_path: Path) -> None:
+    assignment_id = _create_assignment(db_path)
+    app = _new_app()
+    _fill_period(app, date(2026, 10, 1), status="DEV")
+    app = app.run()
+    app.selectbox(key="work_period_assignment_1_new").set_value(assignment_id)
+    app.text_input(key="work_period_ratio_1_new").set_value("70.5")
+    app.button(key="work_period_submit_1_new").click()
+    app = app.run()
+
+    assert not app.exception
+    with open_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT work_status_code, assignment_id, billing_ratio_bp FROM work_period"
+        ).fetchone()
+    assert row == ("DEV", assignment_id, 7050)
+
+
+def test_tc_scn_013_overlapping_period_shows_error(db_path: Path) -> None:
+    app = _new_app()
+    for start in (date(2026, 10, 1), date(2026, 11, 1)):
+        _fill_period(app, start)
+        app = app.run()
+        app.button(key="work_period_submit_1_new").click()
+        app = app.run()
+
+    assert any("期間が重なっています" in error.value for error in app.error)
+    assert _count(db_path, "work_period") == 1
+
+
+def test_edit_period(db_path: Path) -> None:
+    app = _new_app()
+    _fill_period(app, date(2026, 10, 1))
+    app = app.run()
+    app.button(key="work_period_submit_1_new").click()
+    app = app.run()
+    with open_connection(db_path) as connection:
+        period_id = connection.execute("SELECT id FROM work_period").fetchone()[0]
+
+    app.selectbox(key="work_period_selected_1").set_value(period_id)
+    app = app.run()
+    suffix = f"1_{period_id}"
+    assert app.text_input(key=f"work_period_ratio_{suffix}").value == "100.00"
+    app.date_input(key=f"work_period_end_{suffix}").set_value(date(2026, 10, 31))
+    app.button(key=f"work_period_submit_{suffix}").click()
+    app = app.run()
+
+    assert not app.exception
+    with open_connection(db_path) as connection:
+        end_date = connection.execute("SELECT end_date FROM work_period").fetchone()[0]
+    assert end_date == "2026-10-31"
+    assert app.selectbox(key="work_period_selected_1").value == period_id
