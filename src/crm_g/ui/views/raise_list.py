@@ -2,8 +2,8 @@
 
 期間（半期、または通期）と氏名の部分一致で、昇給（給与改定）を一覧にする。
 昇給額は、新しい月給合計から直前の履歴の月給合計を引いた値（`CLC-016`）で、
-直前の履歴が無い行は「－」と表示する。期間の選択肢は、2025年度から、今日が
-属する期・半期の次までとする（`UID-063`の半期選択に準じる）。
+直前の履歴が無い行は「－」と表示する。半期は、共通の選択欄（`UID-063`）で選ぶ。通期の
+選択肢は、19期（2025年度）から、今日が属する期の次までとする。
 """
 
 from datetime import date
@@ -11,80 +11,42 @@ from datetime import date
 import streamlit as st
 
 from crm_g.application.salary_history import RaiseRow, list_raises
-from crm_g.domain.period import fiscal_year_date_range, half_date_range
+from crm_g.domain.period import (
+    FIRST_SELECTABLE_FISCAL_YEAR,
+    current_fiscal_half,
+    fiscal_year_date_range,
+    fiscal_year_label,
+    half_date_range,
+    half_label,
+)
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
+from crm_g.ui.components.half_selector import select_half
 from crm_g.ui.components.messages import UNEXPECTED_ERROR_MESSAGE, show_errors
 from crm_g.ui.components.view_log import record_view_if_newly_displayed
 
 _SCREEN_NAME = "SCN-031"
-_START_FISCAL_YEAR = 2025
-
-
-def _current_fiscal_year_and_half(today: date) -> tuple[int, int]:
-    fiscal_year = today.year if today.month >= 4 else today.year - 1
-    half = 1 if 4 <= today.month <= 9 else 2
-    return fiscal_year, half
-
-
-def _half_options(today: date) -> list[tuple[int, int]]:
-    end_year, end_half = _current_fiscal_year_and_half(today)
-    if end_half == 2:
-        end_year, end_half = end_year + 1, 1
-    else:
-        end_half = 2
-
-    options: list[tuple[int, int]] = []
-    year, half = _START_FISCAL_YEAR, 1
-    while (year, half) <= (end_year, end_half):
-        options.append((year, half))
-        if half == 1:
-            half = 2
-        else:
-            year += 1
-            half = 1
-    return options
-
-
-def _year_options(today: date) -> list[int]:
-    current_fiscal_year, _ = _current_fiscal_year_and_half(today)
-    return list(range(_START_FISCAL_YEAR, current_fiscal_year + 2))
-
-
-def _half_label(year: int, half: int) -> str:
-    return f"{year}年度 {'上期' if half == 1 else '下期'}"
 
 
 def _render_period_selector() -> tuple[date, date, str]:
-    today = date.today()
     unit = st.radio("期間の単位", ["半期", "通期"], key="raise_list_period_unit")
 
     if unit == "半期":
-        options = _half_options(today)
-        current = _current_fiscal_year_and_half(today)
-        labels = [_half_label(year, half) for year, half in options]
-        default_index = options.index(current) if current in options else len(options) - 1
-        selected_label = st.selectbox(
-            "対象期間", labels, index=default_index, key="raise_list_half"
-        )
-        year, half = options[labels.index(selected_label)]
-        period_start, period_end = half_date_range(year, half)
-        return period_start, period_end, selected_label
+        fiscal_year, half = select_half("対象期間", key="raise_list_half")
+        period_start, period_end = half_date_range(fiscal_year, half)
+        return period_start, period_end, half_label(fiscal_year, half)
 
-    year_options = _year_options(today)
-    current_fiscal_year, _ = _current_fiscal_year_and_half(today)
-    default_index = (
-        year_options.index(current_fiscal_year) if current_fiscal_year in year_options else 0
-    )
+    current_fiscal_year, _ = current_fiscal_half(date.today())
+    year_options = list(range(FIRST_SELECTABLE_FISCAL_YEAR, current_fiscal_year + 2))
     selected_year = st.selectbox(
         "対象期間",
         year_options,
-        index=default_index,
-        format_func=lambda year: f"{year}年度（通期）",
+        index=year_options.index(current_fiscal_year),
+        format_func=lambda year: f"{fiscal_year_label(year)}（通期）",
         key="raise_list_year",
     )
     period_start, period_end = fiscal_year_date_range(selected_year)
-    return period_start, period_end, f"{selected_year}年度（通期）"
+    return period_start, period_end, f"{fiscal_year_label(selected_year)}（通期）"
 
 
 def _amount_or_dash(amount: int | None) -> str:

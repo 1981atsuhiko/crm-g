@@ -51,3 +51,48 @@ def half_date_range(fiscal_year: int, half: int) -> tuple[date, date]:
 def fiscal_year_date_range(fiscal_year: int) -> tuple[date, date]:
     """年度（通期）から、開始日・終了日を求める（CLC-002、`SCN-031`）。"""
     return date(fiscal_year, 4, 1), date(fiscal_year + 1, 3, 31)
+
+
+FIRST_SELECTABLE_FISCAL_YEAR = 2025
+
+
+def current_fiscal_half(today: date) -> tuple[int, int]:
+    """今日が属する、年度と半期（1または2）を返す（CLC-002）。"""
+    fiscal_year = today.year if today.month >= 4 else today.year - 1
+    half = 1 if 4 <= today.month <= 9 else 2
+    return fiscal_year, half
+
+
+def selectable_halves(
+    today: date, first_fiscal_year: int = FIRST_SELECTABLE_FISCAL_YEAR
+) -> tuple[tuple[int, int], ...]:
+    """半期の選択肢を返す。first_fiscal_year の上期から、今日が属する半期の次まで（`UID-063`）。"""
+    fiscal_year, half = current_fiscal_half(today)
+    last = (fiscal_year, 2) if half == 1 else (fiscal_year + 1, 1)
+    options: list[tuple[int, int]] = []
+    current = (first_fiscal_year, 1)
+    while current <= last:
+        options.append(current)
+        current = (current[0], 2) if current[1] == 1 else (current[0] + 1, 1)
+    return tuple(options)
+
+
+def fiscal_year_label(fiscal_year: int) -> str:
+    """年度を「20期」の形で表す（CLC-002）。"""
+    return f"{fiscal_year - _FISCAL_YEAR_BASE}期"
+
+
+def half_label(fiscal_year: int, half: int) -> str:
+    """半期を「20期 上期」の形で表す（`UID-063`）。"""
+    if half not in (1, 2):
+        raise ValueError("half は1または2で指定してください")
+    return f"{fiscal_year_label(fiscal_year)} {'上期' if half == 1 else '下期'}"
+
+
+def half_months(fiscal_year: int, half: int) -> tuple[tuple[int, int], ...]:
+    """半期に含まれる6か月を、(年, 月) の昇順で返す。"""
+    start, _ = half_date_range(fiscal_year, half)
+    return tuple(
+        (start.year + (start.month - 1 + offset) // 12, (start.month - 1 + offset) % 12 + 1)
+        for offset in range(6)
+    )

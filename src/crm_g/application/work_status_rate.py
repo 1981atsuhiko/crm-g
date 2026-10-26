@@ -7,15 +7,12 @@
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
 
 from crm_g.application.operation_log import Operation, OperationLogDetail, record_operation_log
+from crm_g.application.percent import InvalidPercentError, parse_percent_to_bp
 from crm_g.domain.period_overlap import periods_overlap
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
-
-_MAX_RATE_PERCENT = Decimal("100")
-_BP_PER_PERCENT = Decimal("100")  # payroll_rate_bp は万分率（100.00%＝10000）
 
 
 class InvalidRateError(RuntimeError):
@@ -94,23 +91,9 @@ def rate_history(connection: sqlite3.Connection, work_status_code: str) -> tuple
 def _parse_rate_percent(rate_percent: str) -> int:
     """「給与支給率（%）」の入力文字列を、`payroll_rate_bp`（万分率）に変換する。"""
     try:
-        value = Decimal(rate_percent)
-    except InvalidOperation as error:
-        raise InvalidRateError("給与支給率は、数値で入力してください") from error
-
-    # `Decimal("nan")` はここでは例外にならず、後続の比較で InvalidOperation を
-    # 起こすため、ここで明示的に弾く。
-    if value.is_nan():
-        raise InvalidRateError("給与支給率は、数値で入力してください")
-
-    if not (0 <= value <= _MAX_RATE_PERCENT):
-        raise InvalidRateError("給与支給率は、0〜100の範囲で入力してください")
-
-    scaled = value * _BP_PER_PERCENT
-    if scaled != scaled.to_integral_value():
-        raise InvalidRateError("給与支給率は、小数第2位までで入力してください")
-
-    return int(scaled)
+        return parse_percent_to_bp(rate_percent, "給与支給率")
+    except InvalidPercentError as error:
+        raise InvalidRateError(str(error)) from error
 
 
 def change_rate(

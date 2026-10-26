@@ -4,7 +4,16 @@ from datetime import date
 
 import pytest
 
-from crm_g.domain.period import fiscal_half, fiscal_year_date_range, half_date_range
+from crm_g.domain.period import (
+    current_fiscal_half,
+    fiscal_half,
+    fiscal_year_date_range,
+    fiscal_year_label,
+    half_date_range,
+    half_label,
+    half_months,
+    selectable_halves,
+)
 
 
 @pytest.mark.parametrize(
@@ -50,3 +59,57 @@ def test_half_date_range_rejects_invalid_half() -> None:
 
 def test_fiscal_year_date_range() -> None:
     assert fiscal_year_date_range(2026) == (date(2026, 4, 1), date(2027, 3, 31))
+
+
+@pytest.mark.parametrize(
+    ("today", "expected"),
+    [
+        (date(2026, 3, 31), (2025, 2)),
+        (date(2026, 4, 1), (2026, 1)),
+        (date(2026, 9, 30), (2026, 1)),
+        (date(2026, 10, 1), (2026, 2)),
+    ],
+)
+def test_current_fiscal_half(today: date, expected: tuple[int, int]) -> None:
+    assert current_fiscal_half(today) == expected
+
+
+def test_selectable_halves_run_until_the_next_half() -> None:
+    assert selectable_halves(date(2026, 10, 26)) == (
+        (2025, 1),
+        (2025, 2),
+        (2026, 1),
+        (2026, 2),
+        (2027, 1),
+    )
+    assert selectable_halves(date(2025, 4, 1))[-1] == (2025, 2)
+
+
+def test_half_and_fiscal_year_labels() -> None:
+    assert half_label(2026, 1) == "20期 上期"
+    assert half_label(2025, 2) == "19期 下期"
+    assert fiscal_year_label(2026) == "20期"
+
+
+def test_half_label_rejects_invalid_half() -> None:
+    with pytest.raises(ValueError, match="half"):
+        half_label(2026, 3)
+
+
+def test_half_months() -> None:
+    assert half_months(2026, 1) == (
+        (2026, 4),
+        (2026, 5),
+        (2026, 6),
+        (2026, 7),
+        (2026, 8),
+        (2026, 9),
+    )
+    assert half_months(2026, 2) == (
+        (2026, 10),
+        (2026, 11),
+        (2026, 12),
+        (2027, 1),
+        (2027, 2),
+        (2027, 3),
+    )

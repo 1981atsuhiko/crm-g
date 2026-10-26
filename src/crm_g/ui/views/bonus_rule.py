@@ -25,30 +25,23 @@ from crm_g.application.bonus_rule import (
     add_bonus_rule,
     list_bonus_rules,
 )
-from crm_g.domain.period import fiscal_half
+from crm_g.domain.period import half_label, selectable_halves
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
 from crm_g.ui.components.messages import show_errors, show_success, show_unexpected_error
 
-_MIN_YEAR = 2025
 _TARGET_PAY_SYSTEM = "通常評価制度"
 
 
 def _half_options() -> list[str]:
-    """2025年上期から、今日が属する半期の次の半期までの候補を返す（`UID-063`）。"""
-    today = date.today()
-    current = fiscal_half(today.year, today.month)
-    if current.half_code.endswith("H1"):
-        end_year, end_half = current.fiscal_year, 2
-    else:
-        end_year, end_half = current.fiscal_year + 1, 1
+    """半期の候補を、半期コード（例：`2026-H1`）で返す（`UID-063`）。"""
+    return [f"{year}-H{half}" for year, half in selectable_halves(date.today())]
 
-    options = []
-    year, half = _MIN_YEAR, 1
-    while (year, half) <= (end_year, end_half):
-        options.append(f"{year}-H{half}")
-        year, half = (year, 2) if half == 1 else (year + 1, 1)
-    return options
+
+def _half_code_label(half_code: str) -> str:
+    """半期コードを、「20期 上期」の形で表す（`UID-063`）。"""
+    year, half = half_code.split("-H")
+    return half_label(int(year), int(half))
 
 
 def _render_rule_section(db_path: Path) -> None:
@@ -98,7 +91,13 @@ def _render_rate_section(db_path: Path) -> None:
     st.subheader("掛け率")
 
     options = _half_options()
-    selected_half = st.selectbox("半期", options, index=len(options) - 1, key="bonus_rate_half")
+    selected_half = st.selectbox(
+        "半期",
+        options,
+        index=len(options) - 1,
+        format_func=_half_code_label,
+        key="bonus_rate_half",
+    )
 
     with open_connection(db_path) as connection:
         rates = list_rates(connection, selected_half)

@@ -11,6 +11,7 @@ from crm_g.application.salary_history import (
     SalaryItemInput,
     register_salary_history,
 )
+from crm_g.domain.period import current_fiscal_half, fiscal_year_label, half_label
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.migration import apply_migrations
 
@@ -88,3 +89,16 @@ def test_search_filters_by_name(localappdata: Path) -> None:
 
     assert not app.exception
     assert len(app.info) == 1
+
+
+def test_period_labels_use_fiscal_period_numbers(localappdata: Path) -> None:
+    fiscal_year, half = current_fiscal_half(date.today())
+    app = _new_app()
+    assert any(half_label(fiscal_year, half) in caption.value for caption in app.caption)
+
+    app.radio(key="raise_list_period_unit").set_value("通期")
+    app = app.run()
+
+    assert not app.exception
+    expected = f"{fiscal_year_label(fiscal_year)}（通期）"
+    assert any(expected in caption.value for caption in app.caption)
