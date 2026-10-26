@@ -375,3 +375,96 @@ def test_edit_period(db_path: Path) -> None:
         end_date = connection.execute("SELECT end_date FROM work_period").fetchone()[0]
     assert end_date == "2026-10-31"
     assert app.selectbox(key="work_period_selected_1").value == period_id
+
+
+# ---- 状態の切り替え ----
+
+
+def _register_open_period(app: AppTest) -> AppTest:
+    _fill_period(app, date(2026, 10, 1))
+    app = app.run()
+    app.button(key="work_period_submit_1_new").click()
+    return app.run()
+
+
+def _switch(app: AppTest, switch_date: date, status: str = "TRN_FULL") -> AppTest:
+    app.date_input(key="work_switch_date_1").set_value(switch_date)
+    app.selectbox(key="work_switch_status_1").set_value(status)
+    app = app.run()
+    app.button(key="work_switch_submit_1").click()
+    return app.run()
+
+
+def test_tc_scn_015_switch_closes_open_period_and_adds_new_one(db_path: Path) -> None:
+    app = _register_open_period(_new_app())
+
+    app = _switch(app, date(2026, 11, 10))
+
+    assert not app.exception
+    assert any("状態を切り替えました" in toast.value for toast in app.toast)
+    with open_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT start_date, end_date, work_status_code FROM work_period ORDER BY start_date"
+        ).fetchall()
+    assert rows == [
+        ("2026-10-01", "2026-11-09", "WAIT_FULL"),
+        ("2026-11-10", None, "TRN_FULL"),
+    ]
+    assert app.date_input(key="work_switch_date_1").value is None
+
+
+def test_switch_without_open_period_shows_error(db_path: Path) -> None:
+    app = _switch(_new_app(), date(2026, 11, 10))
+
+    assert any("継続中の稼働期間がありません" in error.value for error in app.error)
+    assert _count(db_path, "work_period") == 0
+
+
+def test_switch_on_open_period_start_shows_error(db_path: Path) -> None:
+    app = _register_open_period(_new_app())
+
+    app = _switch(app, date(2026, 10, 1))
+
+    assert any("より後にしてください" in error.value for error in app.error)
+    assert _count(db_path, "work_period") == 1
+
+
+def test_switch_to_billable_status_requires_assignment(db_path: Path) -> None:
+    app = _register_open_period(_new_app())
+
+    app = _switch(app, date(2026, 11, 10), status="DEV")
+
+    assert any("参画を選んでください" in error.value for error in app.error)
+    assert _count(db_path, "work_period") == 1
+
+
+def test_switch_to_billable_status_with_assignment(db_path: Path) -> None:
+    assignment_id = _create_assignment(db_path)
+    app = _register_open_period(_new_app())
+    app.date_input(key="work_switch_date_1").set_value(date(2026, 11, 10))
+    app.selectbox(key="work_switch_status_1").set_value("DEV")
+    app = app.run()
+    app.selectbox(key="work_switch_assignment_1").set_value(assignment_id)
+    app.button(key="work_switch_submit_1").click()
+    app = app.run()
+
+    assert not app.exception
+    with open_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT work_status_code, assignment_id FROM work_period WHERE end_date IS NULL"
+        ).fetchone()
+    assert row == ("DEV", assignment_id)
+
+
+def test_edit_form_shows_end_date_set_by_switch(db_path: Path) -> None:
+    app = _register_open_period(_new_app())
+    with open_connection(db_path) as connection:
+        period_id = connection.execute("SELECT id FROM work_period").fetchone()[0]
+    app.selectbox(key="work_period_selected_1").set_value(period_id)
+    app = app.run()
+    assert app.date_input(key=f"work_period_end_1_{period_id}").value is None
+
+    app = _switch(app, date(2026, 11, 10))
+
+    assert not app.exception
+    assert app.date_input(key=f"work_period_end_1_{period_id}").value == date(2026, 11, 9)

@@ -1,6 +1,7 @@
 """稼働期間（`SCN-050` 稼働期間タブ、`TBL-016`）。
 
-稼働期間の一覧・登録・編集と、社員×月の表を扱う。削除は設けない（画面設計書 6.1）。
+稼働期間の一覧・登録・編集、状態の切り替え（`UID-079`）と、社員×月の表を扱う。
+削除は設けない（画面設計書 6.1）。
 検証は、データ設計書 10章 No.2（同じ社員の期間が重ならない。編集では自身を除く）と
 No.3（売上計上の状態は参画を持つ）による。参画の選択肢は、その社員の参画だけ
 （画面設計書 6.1）。売上計上でない状態では、参画を保存しない。登録・編集は、
@@ -11,7 +12,7 @@ import calendar
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from crm_g.application.employee import list_employees
@@ -71,6 +72,14 @@ class PeriodOverlapError(RuntimeError):
     """同じ社員の他の稼働期間と、期間が重なるときのエラー（データ設計書 10章 No.2）。"""
 
 
+class NoOpenPeriodError(RuntimeError):
+    """状態の切り替えで、継続中（終了日が空）の稼働期間がないときのエラー（`UID-079`）。"""
+
+
+class InvalidSwitchDateError(RuntimeError):
+    """切り替え日が、継続中の稼働期間の開始日以前のときのエラー（`UID-079`）。"""
+
+
 @dataclass(frozen=True)
 class WorkStatusOption:
     """稼働状態の選択肢。"""
@@ -102,6 +111,17 @@ class WorkPeriodInput:
 
     start_date: date
     end_date: date | None
+    work_status_code: str
+    assignment_id: int | None
+    billing_ratio_percent: str
+    note: str | None
+
+
+@dataclass(frozen=True)
+class StatusSwitchInput:
+    """状態の切り替えで使う入力値（`UID-079`）。新しい稼働期間の終了日は、空とする。"""
+
+    switch_date: date
     work_status_code: str
     assignment_id: int | None
     billing_ratio_percent: str
@@ -279,6 +299,76 @@ def update_work_period(
                     after_value=after_value,
                 ),
             )
+
+
+def switch_work_status(
+    connection: sqlite3.Connection, employee_id: int, data: StatusSwitchInput
+) -> int:
+    """継続中の稼働期間を切り替え日の前日で終え、新しい稼働期間を追加する（`UID-079`）。
+
+    2つの変更は、1つのトランザクションで行う。追加した稼働期間のIDを返す。
+    """
+    with transaction(connection):
+        current = connection.execute(
+            "SELECT id, start_date FROM work_period WHERE employee_id = ? AND end_date IS NULL",
+            (employee_id,),
+        ).fetchone()
+        if current is None:
+            raise NoOpenPeriodError("継続中の稼働期間がありません。稼働期間を登録してください")
+        current_id, current_start = current
+        if data.switch_date.isoformat() <= current_start:
+            raise InvalidSwitchDateError(
+                f"切り替え日は、継続中の稼働期間の開始日（{current_start}）より後にしてください"
+            )
+
+        # 継続中の期間は終わらせるため、重なりの判定から除く。
+        values = {
+            "employee_id": employee_id,
+            **_validate(
+                connection,
+                employee_id,
+                WorkPeriodInput(
+                    start_date=data.switch_date,
+                    end_date=None,
+                    work_status_code=data.work_status_code,
+                    assignment_id=data.assignment_id,
+                    billing_ratio_percent=data.billing_ratio_percent,
+                    note=data.note,
+                ),
+                exclude_id=current_id,
+            ),
+        }
+        previous_end = (data.switch_date - timedelta(days=1)).isoformat()
+        now = to_iso8601(utc_now())
+        connection.execute(
+            "UPDATE work_period SET end_date = ?, updated_at = ? WHERE id = ?",
+            (previous_end, now, current_id),
+        )
+        record_operation_log(
+            connection,
+            Operation.UPDATE,
+            "work_period",
+            OperationLogDetail(
+                target_key=str(current_id),
+                before_value={"end_date": None},
+                after_value={"end_date": previous_end},
+            ),
+        )
+        cursor = connection.execute(
+            "INSERT INTO work_period (employee_id, start_date, end_date, work_status_code, "
+            "assignment_id, billing_ratio_bp, note, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (*values.values(), now, now),
+        )
+        new_id = cursor.lastrowid
+        assert new_id is not None  # noqa: S101 AUTOINCREMENT主キーのINSERT直後のため必ず取得できる
+        record_operation_log(
+            connection,
+            Operation.CREATE,
+            "work_period",
+            OperationLogDetail(target_key=str(new_id), after_value=values),
+        )
+    return new_id
 
 
 def _business_days(connection: sqlite3.Connection, first: date, last: date) -> tuple[date, ...]:

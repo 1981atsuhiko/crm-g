@@ -1,7 +1,7 @@
 """稼働画面（`SCN-050`）。
 
 2つのタブ（稼働期間・参画）で構成する。稼働期間タブは、半期の社員×月の表と、選んだ
-社員の稼働期間の登録・編集を扱う。単価は必ず参画に紐づくため、参画のタブで、選んだ
+社員の稼働期間の登録・編集・状態の切り替え（`UID-079`）を扱う。単価は必ず参画に紐づくため、参画のタブで、選んだ
 参画の単価を登録・編集・削除する（社員→参画→単価。データ設計書 `DBD-018`）。
 確認ダイアログ（`UID-053`）は、単価の削除だけに出す。
 締め済みの月への警告（`UID-054`）と再計算の接続はPH-10で行う。操作ログへの記録は、
@@ -70,6 +70,7 @@ _RATE_FIELDS = ("effective_from", "unit_price", "basis", "note")
 # `value=None` の日付欄は、既定では10年前より古い日を選べないため、下限を明示する。
 _MIN_DATE = date(2000, 1, 1)
 _PERIOD_FIELDS = ("start", "end", "status", "assignment", "ratio", "note")
+_SWITCH_FIELDS = ("date", "status", "assignment", "ratio", "note")
 _NEW_PERIOD = "（新しく登録する）"
 _UNSELECTED_ASSIGNMENT = "（選んでください）"
 _DEFAULT_RATIO = "100.00"
@@ -309,6 +310,26 @@ def _period_label(period: work_period_app.WorkPeriod) -> str:
     return f"{period.start_date.isoformat()}〜{end}：{period.work_status_name}"
 
 
+def _select_assignment(
+    db_path: Path, employee_id: int, current: int | None, *, key: str
+) -> int | None:
+    """売上計上の稼働状態のときに出す、参画の選択欄。選択肢は、その社員の参画だけ。"""
+    with open_connection(db_path) as connection:
+        assignments = list_assignments(connection, employee_id)
+    by_id = {assignment.id: assignment for assignment in assignments}
+    options: list[int | None] = [None, *by_id]
+    selected: int | None = st.selectbox(
+        "参画（売上計上の稼働状態では必須）",
+        options,
+        index=options.index(current) if current in options else 0,
+        format_func=lambda option: (
+            _UNSELECTED_ASSIGNMENT if option is None else by_id[option].label
+        ),
+        key=key,
+    )
+    return selected
+
+
 def _render_period_form(
     db_path: Path,
     employee_id: int,
@@ -342,18 +363,10 @@ def _render_period_form(
 
     assignment_id: int | None = None
     if status_by_code[status_code].is_billable:
-        with open_connection(db_path) as connection:
-            assignments = list_assignments(connection, employee_id)
-        by_id = {assignment.id: assignment for assignment in assignments}
-        assignment_options: list[int | None] = [None, *by_id]
-        current = existing.assignment_id if existing else None
-        assignment_id = st.selectbox(
-            "参画（売上計上の稼働状態では必須）",
-            assignment_options,
-            index=assignment_options.index(current) if current in assignment_options else 0,
-            format_func=lambda option: (
-                _UNSELECTED_ASSIGNMENT if option is None else by_id[option].label
-            ),
+        assignment_id = _select_assignment(
+            db_path,
+            employee_id,
+            existing.assignment_id if existing else None,
             key=f"work_period_assignment_{suffix}",
         )
     ratio_text = st.text_input(
@@ -409,6 +422,77 @@ def _render_period_form(
     _finish("稼働期間を更新しました" if existing else "稼働期間を登録しました")
 
 
+def _render_status_switch(
+    db_path: Path, employee_id: int, statuses: tuple[work_period_app.WorkStatusOption, ...]
+) -> None:
+    """月の途中で状態を切り替える（`UID-079`）。継続中の期間を前日で終え、新しい期間を足す。"""
+    st.subheader("状態の切り替え")
+    st.caption(
+        "継続中の稼働期間を、切り替え日の前日で終え、切り替え日からの新しい稼働期間を"
+        "追加します（終了日は空＝継続中）。"
+    )
+    suffix = str(employee_id)
+    status_by_code = {status.code: status for status in statuses}
+    codes = list(status_by_code)
+
+    switch_date = st.date_input(
+        "切り替え日", value=None, min_value=_MIN_DATE, key=f"work_switch_date_{suffix}"
+    )
+    status_code = st.selectbox(
+        "新しい稼働状態",
+        codes,
+        format_func=lambda code: status_by_code[code].name,
+        key=f"work_switch_status_{suffix}",
+    )
+    assignment_id: int | None = None
+    if status_by_code[status_code].is_billable:
+        assignment_id = _select_assignment(
+            db_path, employee_id, None, key=f"work_switch_assignment_{suffix}"
+        )
+    ratio_text = st.text_input(
+        "稼働率（%）", value=_DEFAULT_RATIO, key=f"work_switch_ratio_{suffix}"
+    )
+    note = st.text_input("備考（例：11/10入場）", key=f"work_switch_note_{suffix}")
+
+    if not st.button("状態を切り替える", key=f"work_switch_submit_{suffix}"):
+        return
+    if not isinstance(switch_date, date):
+        show_errors(["切り替え日を入力してください"])
+        return
+
+    data = work_period_app.StatusSwitchInput(
+        switch_date=switch_date,
+        work_status_code=status_code,
+        assignment_id=assignment_id,
+        billing_ratio_percent=ratio_text,
+        note=note or None,
+    )
+    try:
+        with open_connection(db_path) as connection:
+            work_period_app.switch_work_status(connection, employee_id, data)
+    except (
+        work_period_app.NoOpenPeriodError,
+        work_period_app.InvalidSwitchDateError,
+        work_period_app.InvalidBillingRatioError,
+        work_period_app.InvalidWorkStatusError,
+        work_period_app.MissingAssignmentError,
+        work_period_app.AssignmentNotOwnedError,
+        work_period_app.PeriodOverlapError,
+    ) as error:
+        show_errors([str(error)])
+        return
+    except Exception:
+        show_unexpected_error()
+        return
+    _clear_inputs("work_switch", _SWITCH_FIELDS, suffix)
+    # 終了日を設定した期間の編集欄に、切り替え前の値（終了日が空）が残らないよう、
+    # この社員の稼働期間の編集欄の入力を捨てて、保存済みの値から作り直させる。
+    prefixes = tuple(f"work_period_{field}_{employee_id}_" for field in _PERIOD_FIELDS)
+    for key in [key for key in st.session_state if str(key).startswith(prefixes)]:
+        st.session_state.pop(key, None)
+    _finish("状態を切り替えました")
+
+
 def _render_employee_periods(
     db_path: Path, employee_id: int, statuses: tuple[work_period_app.WorkStatusOption, ...]
 ) -> None:
@@ -446,6 +530,7 @@ def _render_employee_periods(
     _render_period_form(
         db_path, employee_id, by_id[selected_id] if selected_id is not None else None, statuses
     )
+    _render_status_switch(db_path, employee_id, statuses)
 
 
 def _render_period_tab(db_path: Path) -> None:

@@ -13,15 +13,19 @@ from crm_g.application.work_period import (
     EmployeeNotFoundError,
     InvalidBillingRatioError,
     InvalidPeriodError,
+    InvalidSwitchDateError,
     InvalidWorkStatusError,
     MissingAssignmentError,
+    NoOpenPeriodError,
     PeriodOverlapError,
+    StatusSwitchInput,
     WorkPeriodInput,
     WorkPeriodNotFoundError,
     create_work_period,
     list_month_grid,
     list_work_periods,
     list_work_statuses,
+    switch_work_status,
     update_work_period,
 )
 from crm_g.infrastructure.db import open_connection
@@ -290,3 +294,120 @@ def test_month_grid_search_ignores_letter_case(db_path: Path) -> None:
         grid = list_month_grid(connection, 2026, 2, ("在籍",), search="taro")
 
     assert [row.employee_name for row in grid] == ["Taro Yamada"]
+
+
+def _switch(**overrides: object) -> StatusSwitchInput:
+    values: dict[str, object] = {
+        "switch_date": date(2026, 11, 10),
+        "work_status_code": "TRN_FULL",
+        "assignment_id": None,
+        "billing_ratio_percent": "100",
+        "note": "11/10入場",
+    }
+    values.update(overrides)
+    return StatusSwitchInput(**values)  # type: ignore[arg-type]
+
+
+def test_tc_scn_015_switch_closes_open_period_and_adds_new_one(db_path: Path) -> None:
+    assignment_id = _assignment(db_path)
+    with open_connection(db_path) as connection:
+        first = create_work_period(connection, 1, _period())
+        new_id = switch_work_status(
+            connection, 1, _switch(work_status_code="DEV", assignment_id=assignment_id)
+        )
+
+        periods = list_work_periods(connection, 1)
+        logs = connection.execute(
+            "SELECT operation, target_key, before_value, after_value FROM operation_log "
+            "WHERE target_table = 'work_period' ORDER BY id"
+        ).fetchall()
+
+    assert [(period.id, period.start_date, period.end_date) for period in periods] == [
+        (first, date(2026, 10, 1), date(2026, 11, 9)),
+        (new_id, date(2026, 11, 10), None),
+    ]
+    assert (periods[1].work_status_code, periods[1].assignment_id) == ("DEV", assignment_id)
+    assert [(log[0], log[1]) for log in logs[1:]] == [("更新", str(first)), ("登録", str(new_id))]
+    assert json.loads(logs[1][2]) == {"end_date": None}
+    assert json.loads(logs[1][3]) == {"end_date": "2026-11-09"}
+
+
+def test_switch_without_open_period_is_rejected(db_path: Path) -> None:
+    with open_connection(db_path) as connection:
+        create_work_period(connection, 1, _period(end_date=date(2026, 10, 31)))
+
+        with pytest.raises(NoOpenPeriodError):
+            switch_work_status(connection, 1, _switch())
+
+
+@pytest.mark.parametrize("switch_date", [date(2026, 10, 1), date(2026, 9, 30)])
+def test_switch_on_or_before_open_period_start_is_rejected(
+    db_path: Path, switch_date: date
+) -> None:
+    with open_connection(db_path) as connection:
+        create_work_period(connection, 1, _period())
+
+        with pytest.raises(InvalidSwitchDateError):
+            switch_work_status(connection, 1, _switch(switch_date=switch_date))
+
+
+def test_switch_on_the_day_after_start_is_accepted(db_path: Path) -> None:
+    with open_connection(db_path) as connection:
+        create_work_period(connection, 1, _period())
+        switch_work_status(connection, 1, _switch(switch_date=date(2026, 10, 2)))
+
+        assert list_work_periods(connection, 1)[0].end_date == date(2026, 10, 1)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"work_status_code": "DEV"}, MissingAssignmentError),
+        ({"billing_ratio_percent": "abc"}, InvalidBillingRatioError),
+    ],
+)
+def test_failed_switch_changes_nothing(
+    db_path: Path, overrides: dict[str, object], error: type[Exception]
+) -> None:
+    with open_connection(db_path) as connection:
+        create_work_period(connection, 1, _period())
+
+        with pytest.raises(error):
+            switch_work_status(connection, 1, _switch(**overrides))
+
+        periods = list_work_periods(connection, 1)
+        log_count = connection.execute(
+            "SELECT COUNT(*) FROM operation_log WHERE target_table = 'work_period'"
+        ).fetchone()[0]
+    assert [(period.start_date, period.end_date) for period in periods] == [
+        (date(2026, 10, 1), None)
+    ]
+    assert log_count == 1
+
+
+def test_switch_rejects_other_employees_assignment(db_path: Path) -> None:
+    other_assignment = _assignment(db_path, employee_id=2)
+    with open_connection(db_path) as connection:
+        create_work_period(connection, 1, _period())
+
+        with pytest.raises(AssignmentNotOwnedError):
+            switch_work_status(
+                connection, 1, _switch(work_status_code="DEV", assignment_id=other_assignment)
+            )
+
+
+def test_switch_rejects_period_starting_after_open_period(db_path: Path) -> None:
+    with open_connection(db_path) as connection:
+        create_work_period(connection, 1, _period())
+        # 重なり禁止に反する異常なデータ（継続中の期間より後に始まる期間）を直接入れる。
+        connection.execute(
+            "INSERT INTO work_period (employee_id, start_date, end_date, work_status_code, "
+            "billing_ratio_bp, created_at, updated_at) "
+            "VALUES (1, '2026-12-01', '2026-12-31', 'WAIT_FULL', 10000, ?, ?)",
+            (_TIMESTAMP, _TIMESTAMP),
+        )
+        connection.commit()
+
+        with pytest.raises(PeriodOverlapError):
+            switch_work_status(connection, 1, _switch())
+        assert list_work_periods(connection, 1)[0].end_date is None
