@@ -7,9 +7,9 @@ from datetime import date
 
 @dataclass(frozen=True)
 class RateHistoryEntry:
-    """単価履歴の1行。案件単位の単価のときだけ assignment_id を持つ。"""
+    """単価履歴の1行。単価は、必ず参画に紐づく（データ設計書 DBD-018）。"""
 
-    assignment_id: int | None
+    assignment_id: int
     effective_from: date
     unit_price: int
 
@@ -23,9 +23,11 @@ def determine_unit_price(
 ) -> int | None:
     """営業日 day の単価を決める（CLC-013）。無ければ None を返す。
 
-    稼働期間に assignment_id がある場合は、同じ assignment_id の単価履歴だけを見る。
-    無い場合は、assignment_id が NULL の単価履歴（社員単位）だけを見る。
+    稼働期間の assignment_id の単価履歴だけを見る。稼働期間に assignment_id が
+    無いときは、単価なしとする。
     """
+    if assignment_id is None:
+        return None
     candidates = [
         history
         for history in histories

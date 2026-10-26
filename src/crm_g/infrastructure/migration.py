@@ -161,6 +161,10 @@ def apply_migrations(
             )
             connection.commit()
         except sqlite3.Error as error:
+            # 連番SQLが自分で BEGIN したまま失敗すると、トランザクションが開いたまま残る。
+            # 同じ接続を使い続けても途中の変更が混ざらないよう、ここで取り消す。
+            if connection.in_transaction:
+                connection.rollback()
             # ログにはファイル名・例外の型名だけを残す。SQLの文面・業務データは、
             # これらを含み得るため出さない（ARC-018、SCD-042）。
             _logger.error(
