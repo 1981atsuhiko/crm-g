@@ -122,11 +122,17 @@ def _parse_date(value: str | None) -> date | None:
 
 
 def is_month_closed(connection: sqlite3.Connection, year_month: str) -> bool:
-    """その月が締め済みか（締めた社員・月の行が1件でもあるか）を返す。"""
+    """その月が締め済みか（締めた社員・月の行が1件でもあるか）を返す。
+
+    `source` が `取込` の `monthly_pl` は、移行元の確定値として常に締め済みで取り込まれる。
+    これは月次締めではないため、判定に含めない（取込済みの月も再計算の対象。移行設計書
+    `MIG-054`）。取込の行そのものは、保存のときに上書きしない。
+    """
     row = connection.execute(
         "SELECT 1 FROM monthly_payroll WHERE year_month = ? AND is_closed = 1 "
-        "UNION ALL SELECT 1 FROM monthly_pl WHERE year_month = ? AND is_closed = 1 LIMIT 1",
-        (year_month, year_month),
+        "UNION ALL SELECT 1 FROM monthly_pl WHERE year_month = ? AND is_closed = 1 "
+        "AND source != ? LIMIT 1",
+        (year_month, year_month, _SOURCE_IMPORTED),
     ).fetchone()
     return row is not None
 
