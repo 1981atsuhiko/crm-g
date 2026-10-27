@@ -6,3 +6,6 @@
 """
 
 AUTHENTICATED_KEY = "crm_g_authenticated"
+
+# 出力画面（`SCN-080`）の作成済みの CSV。画面を離れたときに `app.py` が破棄する。
+EXPORT_STATE_KEY = "crm_g_export_prepared"
