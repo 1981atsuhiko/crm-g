@@ -7,7 +7,7 @@
 """
 
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
@@ -27,6 +27,8 @@ from crm_g.domain.period import (
 PERIOD_UNITS = ("月別", "半期別", "期別")
 AXES = ("合計", "カテゴリ別", "社員別")
 UNCATEGORIZED = "未分類"
+# 集計の軸ごとの、行の名称の列名（合計は列を持たない）。画面と CSV で共通に使う。
+LABEL_COLUMNS = {"カテゴリ別": "カテゴリ", "社員別": "社員"}
 
 
 class InvalidSalesConditionError(ValueError):
@@ -176,3 +178,14 @@ def summarize_sales(
         missing_months=missing,
         includes_open_months=any(not row.is_closed for row in rows),
     )
+
+
+def display_labels(rows: tuple[SalesRow, ...]) -> list[str | None]:
+    """行の名称（カテゴリ・氏名）。同じ期間に同じ氏名が複数あるときは、社員IDを添える。"""
+    counts = Counter((row.period, row.label) for row in rows if row.employee_id is not None)
+    return [
+        f"{row.label}（{row.employee_id}）"
+        if row.employee_id is not None and counts[(row.period, row.label)] > 1
+        else row.label
+        for row in rows
+    ]

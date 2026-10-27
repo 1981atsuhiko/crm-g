@@ -40,6 +40,7 @@ from crm_g.application.bonus_entry import (
 )
 from crm_g.application.employee import ENROLLMENT_STATUSES, list_employees
 from crm_g.domain.period import current_fiscal_half, half_code, half_label, previous_half
+from crm_g.domain.rounding import rate_four_decimals
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
 from crm_g.ui.components.confirm_dialog import confirm_dialog
@@ -78,7 +79,7 @@ def _yen(amount: int | None) -> str:
 
 
 def _rate(rate_bp: int | None) -> str:
-    return _DASH if rate_bp is None else f"{rate_bp / 10000:g}"
+    return _DASH if rate_bp is None else rate_four_decimals(rate_bp)
 
 
 def _finish(message: str) -> None:
