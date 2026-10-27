@@ -32,6 +32,7 @@ _WORK_PATH = "work"
 _SALES_PATH = "sales"
 _EXPORT_PATH = "export"
 _PASSCODE_CHANGE_PATH = "passcode_change"
+_OPERATION_LOG_PATH = "operation_log"
 
 
 def _is_passcode_set() -> bool:
@@ -53,7 +54,7 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
         return [_page("setup.py", _SETUP_PATH, title="パスコード設定", default=True)]
     if not _is_authenticated():
         return [_page("login.py", _LOGIN_PATH, title="ログイン", default=True)]
-    # PH-14 以降で、バックアップ・操作ログ・データ取込の画面を追加する（パスコード変更は追加済み）。
+    # PH-14 以降で、バックアップ・データ取込の画面を追加する（パスコード変更・操作ログは追加済み）。
     return {
         "ダッシュボード": [_page("home.py", _HOME_PATH, title="ダッシュボード", default=True)],
         "社員": [_page("employee.py", _EMPLOYEE_PATH, title="社員")],
@@ -75,6 +76,7 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
             _page("calculation_setting.py", _CALCULATION_SETTING_PATH, title="計算設定"),
             _page("bonus_rule.py", _BONUS_RULE_PATH, title="賞与ルール・掛け率"),
             _page("passcode_change.py", _PASSCODE_CHANGE_PATH, title="パスコード変更"),
+            _page("operation_log.py", _OPERATION_LOG_PATH, title="操作ログ"),
         ],
     }
 

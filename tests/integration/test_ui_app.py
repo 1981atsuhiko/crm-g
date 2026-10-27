@@ -230,3 +230,18 @@ def test_setup_error_does_not_keep_inputs(localappdata: Path) -> None:
     assert app.error
     assert "setup_passcode" not in app.session_state
     assert "setup_confirm" not in app.session_state
+
+
+def test_authenticated_session_can_open_operation_log(localappdata: Path) -> None:
+    db_path = localappdata / "crm-g" / "crm-g.db"
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+    app = AppTest.from_file(str(_APP_PATH), default_timeout=_APPTEST_TIMEOUT_SECONDS)
+    app.session_state[AUTHENTICATED_KEY] = True
+    app = app.run()
+    app.switch_page("views/operation_log.py")
+    app.run()
+
+    assert _titles(app) == ["操作ログ"]
+    assert not app.exception
