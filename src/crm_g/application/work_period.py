@@ -5,7 +5,8 @@
 検証は、データ設計書 10章 No.2（同じ社員の期間が重ならない。編集では自身を除く）と
 No.3（売上計上の状態は参画を持つ）による。参画の選択肢は、その社員の参画だけ
 （画面設計書 6.1）。売上計上でない状態では、参画を保存しない。登録・編集は、
-`登録`・`更新` として操作ログに記録する（`SCD-020`）。再計算の接続はPH-10で行う。
+`登録`・`更新` として操作ログに記録する（`SCD-020`）。保存したあと、同じ
+トランザクションで再計算する（`ARC-009`）。
 """
 
 import calendar
@@ -23,6 +24,11 @@ from crm_g.application.operation_log import (
     record_operation_log,
 )
 from crm_g.application.percent import InvalidPercentError, parse_percent_to_bp
+from crm_g.application.recalculation import (
+    RecalculationListener,
+    notify_recalculated,
+    recalculate_after_change,
+)
 from crm_g.domain.business_days import is_present
 from crm_g.domain.period import half_months
 from crm_g.domain.period_overlap import periods_overlap
@@ -234,7 +240,7 @@ def _validate(
     }
 
 
-def create_work_period(
+def _create_work_period(
     connection: sqlite3.Connection, employee_id: int, data: WorkPeriodInput
 ) -> int:
     """稼働期間を登録する。登録したIDを返す。"""
@@ -266,7 +272,7 @@ def create_work_period(
     return new_id
 
 
-def update_work_period(
+def _update_work_period(
     connection: sqlite3.Connection, work_period_id: int, data: WorkPeriodInput
 ) -> None:
     """稼働期間を編集する。社員は変えない。"""
@@ -301,7 +307,7 @@ def update_work_period(
             )
 
 
-def switch_work_status(
+def _switch_work_status(
     connection: sqlite3.Connection, employee_id: int, data: StatusSwitchInput
 ) -> int:
     """継続中の稼働期間を切り替え日の前日で終え、新しい稼働期間を追加する（`UID-079`）。
@@ -417,3 +423,51 @@ def list_month_grid(
         )
         grid.append(MonthGridRow(employee.id, employee.name, cells))
     return tuple(grid)
+
+
+def create_work_period(
+    connection: sqlite3.Connection,
+    employee_id: int,
+    data: WorkPeriodInput,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> int:
+    """稼働期間を登録し、開始日以降の計算済みの月を再計算する（`ARC-009`）。"""
+    with transaction(connection):
+        new_id = _create_work_period(connection, employee_id, data)
+        recalculation = recalculate_after_change(connection, data.start_date, [employee_id])
+    notify_recalculated(on_recalculated, recalculation)
+    return new_id
+
+
+def update_work_period(
+    connection: sqlite3.Connection,
+    work_period_id: int,
+    data: WorkPeriodInput,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> None:
+    """稼働期間を編集し、変更前後の開始日の古いほう以降を再計算する（`ARC-009`）。"""
+    with transaction(connection):
+        before = connection.execute(
+            "SELECT employee_id, start_date FROM work_period WHERE id = ?", (work_period_id,)
+        ).fetchone()
+        _update_work_period(connection, work_period_id, data)
+        since = min(date.fromisoformat(before[1]), data.start_date)
+        recalculation = recalculate_after_change(connection, since, [before[0]])
+    notify_recalculated(on_recalculated, recalculation)
+
+
+def switch_work_status(
+    connection: sqlite3.Connection,
+    employee_id: int,
+    data: StatusSwitchInput,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> int:
+    """状態を切り替え（`UID-079`）、切り替え日以降の計算済みの月を再計算する（`ARC-009`）。"""
+    with transaction(connection):
+        new_id = _switch_work_status(connection, employee_id, data)
+        recalculation = recalculate_after_change(connection, data.switch_date, [employee_id])
+    notify_recalculated(on_recalculated, recalculation)
+    return new_id

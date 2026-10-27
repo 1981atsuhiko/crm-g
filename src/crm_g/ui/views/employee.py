@@ -41,6 +41,10 @@ from crm_g.application.employee import (
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
 from crm_g.ui.components.messages import show_errors, show_success, show_unexpected_error
+from crm_g.ui.components.recalculation_notice import (
+    remember_recalculation,
+    show_recalculation_notice,
+)
 from crm_g.ui.components.view_log import record_view_if_newly_displayed
 
 _MODE_KEY = "employee_mode"
@@ -435,8 +439,8 @@ def _save_employee(db_path: Path, employee_id: int | None, data: EmployeeInput) 
     with open_connection(db_path) as connection:
         try:
             if employee_id is None:
-                return create_employee(connection, data)
-            update_employee(connection, employee_id, data)
+                return create_employee(connection, data, on_recalculated=remember_recalculation)
+            update_employee(connection, employee_id, data, on_recalculated=remember_recalculation)
         except (
             InvalidEmailFormatError,
             DuplicateEmailError,
@@ -500,6 +504,7 @@ def _render_employee_form(db_path: Path, employee_id: int | None) -> None:
 
 
 def render() -> None:
+    show_recalculation_notice()
     db_path = get_app_paths().db_path
     mode = st.session_state.get(_MODE_KEY, "list")
     selected_id = st.session_state.get(_SELECTED_ID_KEY)

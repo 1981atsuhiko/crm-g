@@ -2,7 +2,7 @@
 
 稼働状態の給与支給率を変更する。稼働状態の追加・名称変更・売上計上や原価計上の
 変更は、この画面では行わない（要件定義書5.1）。操作ログへの記録は、アプリケーション層で行う（`SCD-020`）。
-再計算の接続はPH-10で行う。
+保存後に、再計算の通知と、締め済みの月への警告を出す（`UID-055`、`UID-054`）。
 """
 
 from datetime import date
@@ -24,6 +24,10 @@ from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
 from crm_g.ui.components.confirm_dialog import confirm_dialog
 from crm_g.ui.components.messages import UNEXPECTED_ERROR_MESSAGE, show_errors, show_success
+from crm_g.ui.components.recalculation_notice import (
+    remember_recalculation,
+    show_recalculation_notice,
+)
 
 _PENDING_RATE_KEY = "work_status_pending_rate"
 _LAST_ERROR_KEY = "work_status_last_error"
@@ -93,6 +97,7 @@ def _confirm_pending_rate(db_path: Path, pending: _PendingRate) -> None:
                     pending["code"],
                     pending["rate_percent"],
                     date.fromisoformat(pending["valid_from"]),
+                    on_recalculated=remember_recalculation,
                 )
             except (InvalidRateError, InvalidValidFromError, PeriodOverlapError) as error:
                 st.session_state[_LAST_ERROR_KEY] = str(error)
@@ -141,6 +146,7 @@ def _render_rate_form(db_path: Path, code: str) -> None:
 
 def render() -> None:
     st.title("稼働状態")
+    show_recalculation_notice()
 
     last_error = st.session_state.pop(_LAST_ERROR_KEY, None)
     if last_error is not None:

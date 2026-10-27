@@ -1,7 +1,7 @@
 """営業日カレンダー画面（`SCN-060`）。
 
 営業日・祝日・会社休日を見て、会社休日などを登録する。操作ログへの記録は、アプリケーション層で行う（`SCD-020`）。
-再計算の接続はPH-10で行う。
+保存後に、再計算の通知と、締め済みの月への警告を出す（`UID-055`、`UID-054`）。
 """
 
 from datetime import date
@@ -27,6 +27,10 @@ from crm_g.ui.components.messages import (
     show_errors,
     show_success,
     show_unexpected_error,
+)
+from crm_g.ui.components.recalculation_notice import (
+    remember_recalculation,
+    show_recalculation_notice,
 )
 
 _MIN_YEAR = 2025
@@ -56,7 +60,7 @@ def _render_create_calendar(db_path: Path, year: int) -> None:
     if st.button("カレンダーの作成", key="create_calendar"):
         with open_connection(db_path) as connection:
             try:
-                create_year_calendar(connection, year)
+                create_year_calendar(connection, year, on_recalculated=remember_recalculation)
             except CalendarAlreadyExistsError:
                 show_errors([f"{year}年の営業日カレンダーは、既に作成されています"])
             except Exception:
@@ -70,7 +74,7 @@ def _render_refetch(db_path: Path, year: int) -> None:
     if st.button("祝日の再取込", key="refetch_holidays"):
         with open_connection(db_path) as connection:
             try:
-                refetch_holidays(connection, year)
+                refetch_holidays(connection, year, on_recalculated=remember_recalculation)
             except Exception:
                 show_unexpected_error()
             else:
@@ -110,7 +114,13 @@ def _confirm_pending_day(db_path: Path, pending: _PendingDay) -> None:
     def _save() -> None:
         with open_connection(db_path) as connection:
             try:
-                register_manual_day(connection, target_date, is_business, note or None)
+                register_manual_day(
+                    connection,
+                    target_date,
+                    is_business,
+                    note or None,
+                    on_recalculated=remember_recalculation,
+                )
             except Exception:
                 st.session_state[_LAST_ERROR_KEY] = UNEXPECTED_ERROR_MESSAGE
             else:
@@ -153,6 +163,7 @@ def _render_register_form(db_path: Path) -> None:
 
 def render() -> None:
     st.title("営業日カレンダー")
+    show_recalculation_notice()
 
     last_error = st.session_state.pop(_LAST_ERROR_KEY, None)
     if last_error is not None:

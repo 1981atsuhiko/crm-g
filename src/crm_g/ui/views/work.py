@@ -4,7 +4,7 @@
 社員の稼働期間の登録・編集・状態の切り替え（`UID-079`）を扱う。単価は必ず参画に紐づくため、参画のタブで、選んだ
 参画の単価を登録・編集・削除する（社員→参画→単価。データ設計書 `DBD-018`）。
 確認ダイアログ（`UID-053`）は、単価の削除だけに出す。
-締め済みの月への警告（`UID-054`）と再計算の接続はPH-10で行う。操作ログへの記録は、
+保存後に、再計算の通知と、締め済みの月への警告を出す（`UID-055`、`UID-054`）。操作ログへの記録は、
 アプリケーション層で行う（`SCD-020`）。
 """
 
@@ -58,6 +58,10 @@ from crm_g.ui.components.messages import (
     show_status,
     show_success,
     show_unexpected_error,
+)
+from crm_g.ui.components.recalculation_notice import (
+    remember_recalculation,
+    show_recalculation_notice,
 )
 
 _LAST_RESULT_KEY = "work_last_result"
@@ -165,7 +169,9 @@ def _render_assignment_form(db_path: Path, employee_id: int, existing: Assignmen
             if existing is None:
                 create_assignment(connection, employee_id, data)
             else:
-                update_assignment(connection, existing.id, data)
+                update_assignment(
+                    connection, existing.id, data, on_recalculated=remember_recalculation
+                )
     except (
         InvalidCustomerNameError,
         InvalidCategoryError,
@@ -243,9 +249,13 @@ def _render_rate_form(db_path: Path, assignment: Assignment, existing: RateHisto
     try:
         with open_connection(db_path) as connection:
             if existing is None:
-                register_rate_history(connection, assignment.id, data)
+                register_rate_history(
+                    connection, assignment.id, data, on_recalculated=remember_recalculation
+                )
             else:
-                update_rate_history(connection, existing.id, data)
+                update_rate_history(
+                    connection, existing.id, data, on_recalculated=remember_recalculation
+                )
     except (
         InvalidUnitPriceError,
         OutsideAssignmentPeriodError,
@@ -399,9 +409,13 @@ def _render_period_form(
     try:
         with open_connection(db_path) as connection:
             if existing is None:
-                work_period_app.create_work_period(connection, employee_id, data)
+                work_period_app.create_work_period(
+                    connection, employee_id, data, on_recalculated=remember_recalculation
+                )
             else:
-                work_period_app.update_work_period(connection, existing.id, data)
+                work_period_app.update_work_period(
+                    connection, existing.id, data, on_recalculated=remember_recalculation
+                )
     except (
         work_period_app.InvalidPeriodError,
         work_period_app.InvalidBillingRatioError,
@@ -469,7 +483,9 @@ def _render_status_switch(
     )
     try:
         with open_connection(db_path) as connection:
-            work_period_app.switch_work_status(connection, employee_id, data)
+            work_period_app.switch_work_status(
+                connection, employee_id, data, on_recalculated=remember_recalculation
+            )
     except (
         work_period_app.NoOpenPeriodError,
         work_period_app.InvalidSwitchDateError,
@@ -587,7 +603,9 @@ def _render_pending_rate_delete(db_path: Path) -> None:
         st.session_state.pop(_PENDING_RATE_DELETE_KEY, None)
         try:
             with open_connection(db_path) as connection:
-                delete_rate_history(connection, pending["rate_history_id"])
+                delete_rate_history(
+                    connection, pending["rate_history_id"], on_recalculated=remember_recalculation
+                )
         except RateHistoryNotFoundError as error:
             st.session_state[_LAST_ERROR_KEY] = str(error)
         except Exception:
@@ -653,6 +671,7 @@ def _render_assignment_tab(db_path: Path) -> None:
 
 def render() -> None:
     st.title("稼働")
+    show_recalculation_notice()
 
     last_error = st.session_state.pop(_LAST_ERROR_KEY, None)
     if last_error is not None:

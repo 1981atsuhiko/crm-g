@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from datetime import date
 
 from crm_g.application.operation_log import Operation, OperationLogDetail, record_operation_log
+from crm_g.application.recalculation import (
+    RecalculationListener,
+    notify_recalculated,
+    recalculate_after_change,
+)
 from crm_g.domain.salary_revision import determine_previous_effective_to, needs_revision_warning
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
@@ -178,7 +183,7 @@ def _validate(data: SalaryHistoryInput) -> None:
             raise InvalidItemAmountError("内訳の金額は、0以上にしてください")
 
 
-def register_salary_history(
+def _register_salary_history(
     connection: sqlite3.Connection, employee_id: int, data: SalaryHistoryInput
 ) -> RegistrationResult:
     """給与履歴を登録する（`SCN-030`）。"""
@@ -332,3 +337,18 @@ def list_raises(
             )
         )
     return tuple(result)
+
+
+def register_salary_history(
+    connection: sqlite3.Connection,
+    employee_id: int,
+    data: SalaryHistoryInput,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> RegistrationResult:
+    """給与履歴を登録し、適用開始日以降の計算済みの月を再計算する（`SCN-030`、`ARC-009`）。"""
+    with transaction(connection):
+        result = _register_salary_history(connection, employee_id, data)
+        recalculation = recalculate_after_change(connection, data.effective_from, [employee_id])
+    notify_recalculated(on_recalculated, recalculation)
+    return result

@@ -47,7 +47,14 @@ def transaction(connection: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 
     タブ間の更新競合を防ぐため、`BEGIN IMMEDIATE` で排他的に開始する（ARC-007）。
     ブロック内で例外が起きたら、ロールバックしてから再送出する。
+
+    すでにトランザクションの中で呼ばれたときは、新しく開始せず、外側のトランザクションに
+    参加する（コミット・ロールバックは外側が行う）。更新ユースケースと再計算を、同じ
+    トランザクションで行うため（`ARC-009`）。
     """
+    if connection.in_transaction:
+        yield connection
+        return
     connection.execute("BEGIN IMMEDIATE")
     try:
         yield connection

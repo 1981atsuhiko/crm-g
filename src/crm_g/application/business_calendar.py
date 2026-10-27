@@ -20,6 +20,11 @@ from crm_g.application.operation_log import (
     changed_values,
     record_operation_log,
 )
+from crm_g.application.recalculation import (
+    RecalculationListener,
+    notify_recalculated,
+    recalculate_after_change,
+)
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
 from crm_g.infrastructure.holidays import year_holidays
@@ -53,7 +58,7 @@ def year_exists(connection: sqlite3.Connection, year: int) -> bool:
     return row is not None
 
 
-def create_year_calendar(connection: sqlite3.Connection, year: int) -> None:
+def _create_year_calendar(connection: sqlite3.Connection, year: int) -> None:
     """指定した年の行を作成する。土日・祝日を非営業日、それ以外を営業日とする。"""
     with transaction(connection):
         if year_exists(connection, year):
@@ -85,7 +90,7 @@ def create_year_calendar(connection: sqlite3.Connection, year: int) -> None:
         )
 
 
-def refetch_holidays(connection: sqlite3.Connection, year: int) -> None:
+def _refetch_holidays(connection: sqlite3.Connection, year: int) -> None:
     """`自動取込`の日だけ、祝日を取得し直して反映する。`手動登録`の日は変更しない。"""
     with transaction(connection):
         holidays = year_holidays(year)
@@ -118,7 +123,7 @@ def refetch_holidays(connection: sqlite3.Connection, year: int) -> None:
             )
 
 
-def register_manual_day(
+def _register_manual_day(
     connection: sqlite3.Connection, day: date, is_business_day: bool, note: str | None
 ) -> None:
     """日を手動で登録する（会社休日、土曜の出勤など）。登録した日は`手動登録`になる。"""
@@ -200,3 +205,44 @@ def month_business_day_count(connection: sqlite3.Connection, year: int, month: i
         (date(year, month, 1).isoformat(), date(year, month, last_day).isoformat()),
     ).fetchone()
     return int(row[0])
+
+
+def create_year_calendar(
+    connection: sqlite3.Connection,
+    year: int,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> None:
+    """指定した年の行を作成し、その年の計算済みの月を全社員分、再計算する（`ARC-009`）。"""
+    with transaction(connection):
+        _create_year_calendar(connection, year)
+        recalculation = recalculate_after_change(connection, date(year, 1, 1), None)
+    notify_recalculated(on_recalculated, recalculation)
+
+
+def refetch_holidays(
+    connection: sqlite3.Connection,
+    year: int,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> None:
+    """祝日を取得し直し、その年の計算済みの月を全社員分、再計算する（`ARC-009`）。"""
+    with transaction(connection):
+        _refetch_holidays(connection, year)
+        recalculation = recalculate_after_change(connection, date(year, 1, 1), None)
+    notify_recalculated(on_recalculated, recalculation)
+
+
+def register_manual_day(
+    connection: sqlite3.Connection,
+    day: date,
+    is_business_day: bool,
+    note: str | None,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> None:
+    """日を手動で登録し、その日以降の計算済みの月を全社員分、再計算する（`ARC-009`）。"""
+    with transaction(connection):
+        _register_manual_day(connection, day, is_business_day, note)
+        recalculation = recalculate_after_change(connection, day, None)
+    notify_recalculated(on_recalculated, recalculation)

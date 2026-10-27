@@ -2,7 +2,7 @@
 
 参画は、社員が参加する顧客・案件の期間である。登録と編集だけを設け、削除は
 設けない（`DBD-010`）。編集では社員を変えない。登録・編集は、`登録`・`更新`
-として操作ログに記録する（`SCD-020`）。再計算の接続はPH-10で行う。
+として操作ログに記録する（`SCD-020`）。区分の変更は、保存したあと、同じトランザクションで再計算する（`ARC-009`）。
 """
 
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
@@ -15,6 +15,11 @@ from crm_g.application.operation_log import (
     OperationLogDetail,
     changed_values,
     record_operation_log,
+)
+from crm_g.application.recalculation import (
+    RecalculationListener,
+    notify_recalculated,
+    recalculate_after_change,
 )
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
@@ -156,7 +161,7 @@ def create_assignment(
     return new_id
 
 
-def update_assignment(
+def _update_assignment(
     connection: sqlite3.Connection, assignment_id: int, data: AssignmentInput
 ) -> None:
     """参画を編集する。社員は変えない。"""
@@ -202,3 +207,26 @@ def update_assignment(
                     after_value=after_value,
                 ),
             )
+
+
+def update_assignment(
+    connection: sqlite3.Connection,
+    assignment_id: int,
+    data: AssignmentInput,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> None:
+    """参画を編集する。区分が変わったときは、月次売上原価の区分に影響するため再計算する。"""
+    with transaction(connection):
+        before = connection.execute(
+            "SELECT employee_id, start_date, category FROM assignment WHERE id = ?",
+            (assignment_id,),
+        ).fetchone()
+        _update_assignment(connection, assignment_id, data)
+        since = (
+            min(date.fromisoformat(before[1]), data.start_date)
+            if before[2] != data.category
+            else None
+        )
+        recalculation = recalculate_after_change(connection, since, [before[0]])
+    notify_recalculated(on_recalculated, recalculation)

@@ -40,6 +40,10 @@ from crm_g.ui.components.messages import (
     show_status,
     show_success,
 )
+from crm_g.ui.components.recalculation_notice import (
+    remember_recalculation,
+    show_recalculation_notice,
+)
 from crm_g.ui.components.two_step_form import discard, is_awaiting_confirmation, start_confirmation
 from crm_g.ui.components.view_log import record_view_if_newly_displayed
 
@@ -215,7 +219,9 @@ def _render_pending_confirmation(db_path: Path, pending: _PendingSalaryHistory) 
     if confirm_column.button(button_label, key="salary_history_confirm"):
         with open_connection(db_path) as connection:
             try:
-                result = register_salary_history(connection, employee_id, data)
+                result = register_salary_history(
+                    connection, employee_id, data, on_recalculated=remember_recalculation
+                )
             except (
                 EmployeeNotFoundError,
                 InvalidPaySystemError,
@@ -284,6 +290,7 @@ def _render_history_list(db_path: Path, employee_id: int) -> None:
 
 def render() -> None:
     st.title("給与履歴の登録")
+    show_recalculation_notice()
 
     last_error = st.session_state.pop(_LAST_ERROR_KEY, None)
     if last_error is not None:

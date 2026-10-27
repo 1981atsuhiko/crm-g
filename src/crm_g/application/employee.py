@@ -1,8 +1,8 @@
 """社員（`SCN-020`、`SCN-021`、`SCN-022`、`TBL-001`）。
 
 一覧・詳細の閲覧（PH-07-1）に加え、登録・編集（PH-07-2）をまとめる。登録・
-編集は、`登録`・`更新` として操作ログに記録する（`SCD-020`）。再計算の接続は
-PH-10で行う。
+編集は、`登録`・`更新` として操作ログに記録する（`SCD-020`）。入社日・退職日の
+変更は、保存したあと、同じトランザクションで再計算する（`ARC-009`）。
 """
 
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
@@ -16,6 +16,12 @@ from crm_g.application.operation_log import (
     OperationLogDetail,
     changed_values,
     record_operation_log,
+)
+from crm_g.application.recalculation import (
+    RecalculationListener,
+    earliest_changed_date,
+    notify_recalculated,
+    recalculate_after_change,
 )
 from crm_g.domain.email_format import is_valid_email_format
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
@@ -455,7 +461,7 @@ def _editable_values(data: EmployeeInput) -> dict[str, Any]:
     }
 
 
-def create_employee(connection: sqlite3.Connection, data: EmployeeInput) -> int:
+def _create_employee(connection: sqlite3.Connection, data: EmployeeInput) -> int:
     """社員を、新しいメールアドレスで登録する（`SCN-022`）。登録したIDを返す。"""
     email = data.email.strip().lower()
     if not is_valid_email_format(email):
@@ -489,7 +495,7 @@ def create_employee(connection: sqlite3.Connection, data: EmployeeInput) -> int:
     return new_id
 
 
-def update_employee(connection: sqlite3.Connection, employee_id: int, data: EmployeeInput) -> None:
+def _update_employee(connection: sqlite3.Connection, employee_id: int, data: EmployeeInput) -> None:
     """既存の社員を変更する（`SCN-022`）。メールアドレスは変更しない（業務キーのため）。"""
     _validate_employee_fields(data)
 
@@ -527,3 +533,40 @@ def update_employee(connection: sqlite3.Connection, employee_id: int, data: Empl
                     after_value=after_value,
                 ),
             )
+
+
+def create_employee(
+    connection: sqlite3.Connection,
+    data: EmployeeInput,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> int:
+    """社員を登録し、入社日以降の計算済みの月を再計算する（`ARC-009`）。登録したIDを返す。"""
+    with transaction(connection):
+        new_id = _create_employee(connection, data)
+        recalculation = recalculate_after_change(connection, data.join_date, [new_id])
+    notify_recalculated(on_recalculated, recalculation)
+    return new_id
+
+
+def update_employee(
+    connection: sqlite3.Connection,
+    employee_id: int,
+    data: EmployeeInput,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> None:
+    """社員を変更する。入社日・退職日が変わったときは、影響する月を再計算する（`ARC-009`）。"""
+    with transaction(connection):
+        before = connection.execute(
+            "SELECT join_date, retire_date FROM employee WHERE id = ?", (employee_id,)
+        ).fetchone()
+        _update_employee(connection, employee_id, data)
+        since = earliest_changed_date(
+            [
+                (date.fromisoformat(before[0]) if before[0] else None, data.join_date),
+                (date.fromisoformat(before[1]) if before[1] else None, data.retire_date),
+            ]
+        )
+        recalculation = recalculate_after_change(connection, since, [employee_id])
+    notify_recalculated(on_recalculated, recalculation)

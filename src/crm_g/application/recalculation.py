@@ -18,7 +18,7 @@
 
 import calendar
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
@@ -79,11 +79,19 @@ class CalculationError:
 
 @dataclass(frozen=True)
 class RecalculationResult:
-    """再計算の結果。`year_months` は、再計算した月（締め済みの月を除く）。"""
+    """再計算の結果。
+
+    `year_months` は、再計算した月（締め済みの月を除く）。`closed_months` は、変更が
+    影響しうるが締め済みのため再計算しなかった月（`UID-054` の警告に使う）。
+    """
 
     year_months: tuple[str, ...]
     saved_count: int
     errors: tuple[CalculationError, ...]
+    closed_months: tuple[str, ...] = ()
+
+
+RecalculationListener = Callable[[RecalculationResult], None]
 
 
 @dataclass(frozen=True)
@@ -569,7 +577,65 @@ def recalculate_since(
         months.extend(result.year_months)
         saved += result.saved_count
         errors.extend(result.errors)
-    return RecalculationResult(tuple(months), saved, tuple(errors))
+    return RecalculationResult(
+        tuple(months), saved, tuple(errors), _closed_months(connection, since, employee_ids)
+    )
+
+
+def _closed_months(
+    connection: sqlite3.Connection, since: date, employee_ids: Sequence[int] | None
+) -> tuple[str, ...]:
+    """`since` の月以降で、締め済みの月を返す。社員ごとの変更では、その社員の行がある月に限る。"""
+    rows = connection.execute(
+        "SELECT DISTINCT year_month, employee_id FROM monthly_payroll WHERE year_month >= ?",
+        (year_month_text(since.year, since.month),),
+    ).fetchall()
+    wanted = set(employee_ids) if employee_ids is not None else None
+    months = sorted({row[0] for row in rows if wanted is None or row[1] in wanted})
+    return tuple(month for month in months if is_month_closed(connection, month))
+
+
+EARLIEST = date(2000, 1, 1)
+"""マスタの属性の変更など、すべての計算済みの月に影響する変更で使う起点。"""
+
+
+def earliest_changed_date(pairs: Iterable[tuple[date | None, date | None]]) -> date | None:
+    """変更前後の日付の組のうち、値が変わった組の日付で、最も古いものを返す。
+
+    どの組も変わっていなければ `None`（再計算しない）。
+    """
+    candidates = [
+        value
+        for before, after in pairs
+        if before != after
+        for value in (before, after)
+        if value is not None
+    ]
+    return min(candidates) if candidates else None
+
+
+def recalculate_after_change(
+    connection: sqlite3.Connection,
+    since: date | None,
+    employee_ids: Sequence[int] | None,
+) -> RecalculationResult | None:
+    """更新ユースケースの最後に、同じトランザクションで再計算する（`ARC-009`）。
+
+    `since` が `None` なら、計算に影響する変更がないものとして何もせず `None` を返す。
+    結果は、コミットのあとで `notify_recalculated` に渡す（コミットが失敗したときに、
+    再計算したと通知しないため）。
+    """
+    if since is None:
+        return None
+    return recalculate_since(connection, since, employee_ids)
+
+
+def notify_recalculated(
+    on_recalculated: RecalculationListener | None, result: RecalculationResult | None
+) -> None:
+    """コミットのあとで、再計算の結果を画面に渡す（通知 `UID-055`・警告 `UID-054`）。"""
+    if on_recalculated is not None and result is not None:
+        on_recalculated(result)
 
 
 def list_calculation_errors(

@@ -16,6 +16,12 @@ from crm_g.application.operation_log import (
     changed_values,
     record_operation_log,
 )
+from crm_g.application.recalculation import (
+    EARLIEST,
+    RecalculationListener,
+    notify_recalculated,
+    recalculate_after_change,
+)
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
 
@@ -202,7 +208,7 @@ def create_pay_item(connection: sqlite3.Connection, code: str, data: PayItemInpu
         )
 
 
-def update_pay_item(connection: sqlite3.Connection, code: str, data: PayItemInput) -> None:
+def _update_pay_item(connection: sqlite3.Connection, code: str, data: PayItemInput) -> None:
     """既存の給与項目を変更する（`SCN-062`）。コード自体は変更できない。"""
     with transaction(connection):
         row = connection.execute(
@@ -235,3 +241,22 @@ def update_pay_item(connection: sqlite3.Connection, code: str, data: PayItemInpu
                     target_key=code, before_value=before_value, after_value=after_value
                 ),
             )
+
+
+def update_pay_item(
+    connection: sqlite3.Connection,
+    code: str,
+    data: PayItemInput,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> None:
+    """給与項目を変更し、すべての計算済みの月を全社員分、再計算する（`ARC-009`）。
+
+    減額順・月給に含むか・原価への加算など、項目の属性は、その項目を使う全ての月に
+    影響するため、起点を `EARLIEST` とする。追加（`create_pay_item`）は、まだどの給与
+    履歴にも使われていないため、再計算しない。
+    """
+    with transaction(connection):
+        _update_pay_item(connection, code, data)
+        recalculation = recalculate_after_change(connection, EARLIEST, None)
+    notify_recalculated(on_recalculated, recalculation)
