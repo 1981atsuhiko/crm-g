@@ -1,7 +1,8 @@
 """計算設定画面（`SCN-063`）。
 
 原価係数を変更する。端数処理は表示のみ（変更できない。`CLC-001`）。
-操作ログへの記録は、アプリケーション層で行う（`SCD-020`）。再計算の接続はPH-10で行う。
+操作ログへの記録は、アプリケーション層で行う（`SCD-020`）。
+保存後に、再計算の通知と、締め済みの月への警告を出す（`UID-055`、`UID-054`）。
 """
 
 from datetime import date
@@ -22,6 +23,10 @@ from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
 from crm_g.ui.components.confirm_dialog import confirm_dialog
 from crm_g.ui.components.messages import UNEXPECTED_ERROR_MESSAGE, show_errors, show_success
+from crm_g.ui.components.recalculation_notice import (
+    remember_recalculation,
+    show_recalculation_notice,
+)
 
 _PENDING_KEY = "calculation_setting_pending"
 _LAST_ERROR_KEY = "calculation_setting_last_error"
@@ -61,7 +66,10 @@ def _confirm_pending(db_path: Path, pending: _PendingCoefficient) -> None:
         with open_connection(db_path) as connection:
             try:
                 change_coefficient(
-                    connection, pending["coefficient"], date.fromisoformat(pending["valid_from"])
+                    connection,
+                    pending["coefficient"],
+                    date.fromisoformat(pending["valid_from"]),
+                    on_recalculated=remember_recalculation,
                 )
             except (InvalidCoefficientError, InvalidValidFromError, PeriodOverlapError) as error:
                 st.session_state[_LAST_ERROR_KEY] = str(error)
@@ -111,6 +119,7 @@ def _render_form(db_path: Path) -> None:
 
 def render() -> None:
     st.title("計算設定")
+    show_recalculation_notice()
 
     last_error = st.session_state.pop(_LAST_ERROR_KEY, None)
     if last_error is not None:

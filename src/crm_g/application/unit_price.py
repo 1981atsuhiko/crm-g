@@ -4,7 +4,7 @@
 終了日の中にする（データ設計書 10章 No.12）。同じ参画・適用開始日の組は登録できない。
 登録・編集・削除ができ、それぞれ `登録`・`更新`・`削除` として操作ログに記録する
 （`SCD-020`）。削除は、誤りの訂正のための例外である（データ設計書 10章 No.10）。
-再計算の接続はPH-10で行う。
+保存したあと、同じトランザクションで再計算する（`ARC-009`）。
 """
 
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
@@ -17,6 +17,11 @@ from crm_g.application.operation_log import (
     OperationLogDetail,
     changed_values,
     record_operation_log,
+)
+from crm_g.application.recalculation import (
+    RecalculationListener,
+    notify_recalculated,
+    recalculate_after_change,
 )
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
@@ -135,7 +140,7 @@ def list_rate_history(
     )
 
 
-def register_rate_history(
+def _register_rate_history(
     connection: sqlite3.Connection, assignment_id: int, data: RateHistoryInput
 ) -> int:
     """参画に単価を登録する。登録したIDを返す。"""
@@ -162,7 +167,7 @@ def register_rate_history(
     return new_id
 
 
-def update_rate_history(
+def _update_rate_history(
     connection: sqlite3.Connection, rate_history_id: int, data: RateHistoryInput
 ) -> None:
     """単価を編集する。参画は変えない。"""
@@ -202,7 +207,7 @@ def update_rate_history(
             )
 
 
-def delete_rate_history(connection: sqlite3.Connection, rate_history_id: int) -> None:
+def _delete_rate_history(connection: sqlite3.Connection, rate_history_id: int) -> None:
     """単価を削除する（誤りの訂正のための例外。データ設計書 10章 No.10）。"""
     with transaction(connection):
         row = connection.execute(
@@ -236,3 +241,59 @@ def delete_rate_history(connection: sqlite3.Connection, rate_history_id: int) ->
                 ),
             ),
         )
+
+
+def _owner(connection: sqlite3.Connection, rate_history_id: int) -> tuple[int, date] | None:
+    row = connection.execute(
+        "SELECT employee_id, effective_from FROM rate_history WHERE id = ?", (rate_history_id,)
+    ).fetchone()
+    return (int(row[0]), date.fromisoformat(row[1])) if row else None
+
+
+def register_rate_history(
+    connection: sqlite3.Connection,
+    assignment_id: int,
+    data: RateHistoryInput,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> int:
+    """参画に単価を登録し、適用開始日以降の計算済みの月を再計算する（`ARC-009`）。"""
+    with transaction(connection):
+        new_id = _register_rate_history(connection, assignment_id, data)
+        owner = _owner(connection, new_id)
+        assert owner is not None  # noqa: S101 登録した直後の行のため必ずある
+        recalculation = recalculate_after_change(connection, data.effective_from, [owner[0]])
+    notify_recalculated(on_recalculated, recalculation)
+    return new_id
+
+
+def update_rate_history(
+    connection: sqlite3.Connection,
+    rate_history_id: int,
+    data: RateHistoryInput,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> None:
+    """単価を編集し、変更前後の適用開始日の古いほう以降を再計算する（`ARC-009`）。"""
+    with transaction(connection):
+        before = _owner(connection, rate_history_id)
+        _update_rate_history(connection, rate_history_id, data)
+        assert before is not None  # noqa: S101 編集できた行のため必ずある
+        since = min(before[1], data.effective_from)
+        recalculation = recalculate_after_change(connection, since, [before[0]])
+    notify_recalculated(on_recalculated, recalculation)
+
+
+def delete_rate_history(
+    connection: sqlite3.Connection,
+    rate_history_id: int,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> None:
+    """単価を削除し、その適用開始日以降の計算済みの月を再計算する（`ARC-009`）。"""
+    with transaction(connection):
+        before = _owner(connection, rate_history_id)
+        _delete_rate_history(connection, rate_history_id)
+        assert before is not None  # noqa: S101 削除できた行のため必ずある
+        recalculation = recalculate_after_change(connection, before[1], [before[0]])
+    notify_recalculated(on_recalculated, recalculation)

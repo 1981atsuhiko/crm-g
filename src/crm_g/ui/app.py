@@ -49,7 +49,7 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
         return [_page("setup.py", _SETUP_PATH, title="パスコード設定", default=True)]
     if not _is_authenticated():
         return [_page("login.py", _LOGIN_PATH, title="ログイン", default=True)]
-    # PH-10 以降で、正式な画面（賞与・売上など）を追加する。
+    # PH-11 以降で、正式な画面（賞与・売上など）を追加する。
     return {
         "ダッシュボード": [_page("home.py", _HOME_PATH, title="ダッシュボード", default=True)],
         "社員": [_page("employee.py", _EMPLOYEE_PATH, title="社員")],

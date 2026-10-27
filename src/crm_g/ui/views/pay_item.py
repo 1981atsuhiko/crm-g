@@ -2,7 +2,7 @@
 
 給与項目・手当を、追加・変更する。削除は設けない（使わなくなった項目は、
 有効期間の終了日を設定する）。操作ログへの記録は、アプリケーション層で行う（`SCD-020`）。
-再計算の接続はPH-10で行う。
+保存後に、再計算の通知と、締め済みの月への警告を出す（`UID-055`、`UID-054`）。
 """
 
 from datetime import date
@@ -30,6 +30,10 @@ from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
 from crm_g.ui.components.confirm_dialog import confirm_dialog
 from crm_g.ui.components.messages import UNEXPECTED_ERROR_MESSAGE, show_errors, show_success
+from crm_g.ui.components.recalculation_notice import (
+    remember_recalculation,
+    show_recalculation_notice,
+)
 
 _NEW_ITEM_LABEL = "（新規追加）"
 _PENDING_KEY = "pay_item_pending"
@@ -95,7 +99,9 @@ def _confirm_pending(db_path: Path, pending: _PendingPayItem) -> None:
                 if pending["is_new"]:
                     create_pay_item(connection, pending["code"], data)
                 else:
-                    update_pay_item(connection, pending["code"], data)
+                    update_pay_item(
+                        connection, pending["code"], data, on_recalculated=remember_recalculation
+                    )
             except (
                 InvalidCodeError,
                 InvalidCategoryError,
@@ -226,6 +232,7 @@ def _render_form(db_path: Path, selected: str, existing: PayItem | None) -> None
 
 def render() -> None:
     st.title("給与項目")
+    show_recalculation_notice()
 
     last_error = st.session_state.pop(_LAST_ERROR_KEY, None)
     if last_error is not None:

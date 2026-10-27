@@ -11,6 +11,11 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
 from crm_g.application.operation_log import Operation, OperationLogDetail, record_operation_log
+from crm_g.application.recalculation import (
+    RecalculationListener,
+    notify_recalculated,
+    recalculate_after_change,
+)
 from crm_g.domain.period_overlap import periods_overlap
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
@@ -86,7 +91,7 @@ def _parse_coefficient(coefficient: str) -> int:
     return int(scaled)
 
 
-def change_coefficient(connection: sqlite3.Connection, coefficient: str, valid_from: date) -> None:
+def _change_coefficient(connection: sqlite3.Connection, coefficient: str, valid_from: date) -> None:
     """原価係数の新しい適用期間を登録する（`SCN-063`）。
 
     直前の期間がある場合は、その終了日を適用開始日の前日に設定してから、新しい行を
@@ -157,3 +162,17 @@ def change_coefficient(connection: sqlite3.Connection, coefficient: str, valid_f
                 },
             ),
         )
+
+
+def change_coefficient(
+    connection: sqlite3.Connection,
+    coefficient: str,
+    valid_from: date,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> None:
+    """原価係数を変更し、適用開始日以降の計算済みの月を全社員分、再計算する（`ARC-009`）。"""
+    with transaction(connection):
+        _change_coefficient(connection, coefficient, valid_from)
+        recalculation = recalculate_after_change(connection, valid_from, None)
+    notify_recalculated(on_recalculated, recalculation)

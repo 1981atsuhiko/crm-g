@@ -122,3 +122,33 @@ def test_tc_arc_005_transaction_rolls_back_on_failure(tmp_path: Path) -> None:
 
         row = connection.execute("SELECT COUNT(*) FROM parent").fetchone()
         assert row[0] == 1
+
+
+def test_nested_transaction_joins_the_outer_one(tmp_path: Path) -> None:
+    """入れ子の transaction() は、外側のトランザクションに参加する（ARC-009）。"""
+    db_path = tmp_path / "test.db"
+
+    with open_connection(db_path) as connection:
+        _create_schema(connection)
+        with transaction(connection):
+            with transaction(connection):
+                connection.execute("INSERT INTO parent (id) VALUES (1)")
+            # 内側を抜けても、まだコミットされていない。
+            assert connection.in_transaction
+            connection.execute("INSERT INTO parent (id) VALUES (2)")
+
+        assert not connection.in_transaction
+        assert connection.execute("SELECT COUNT(*) FROM parent").fetchone()[0] == 2
+
+
+def test_failure_after_nested_transaction_rolls_back_everything(tmp_path: Path) -> None:
+    db_path = tmp_path / "test.db"
+
+    with open_connection(db_path) as connection:
+        _create_schema(connection)
+        with pytest.raises(ValueError, match="失敗させる"), transaction(connection):
+            with transaction(connection):
+                connection.execute("INSERT INTO parent (id) VALUES (1)")
+            raise ValueError("試験のために失敗させる")
+
+        assert connection.execute("SELECT COUNT(*) FROM parent").fetchone()[0] == 0

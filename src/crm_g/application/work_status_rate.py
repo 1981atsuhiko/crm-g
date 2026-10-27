@@ -10,6 +10,11 @@ from datetime import date, timedelta
 
 from crm_g.application.operation_log import Operation, OperationLogDetail, record_operation_log
 from crm_g.application.percent import InvalidPercentError, parse_percent_to_bp
+from crm_g.application.recalculation import (
+    RecalculationListener,
+    notify_recalculated,
+    recalculate_after_change,
+)
 from crm_g.domain.period_overlap import periods_overlap
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
@@ -96,7 +101,7 @@ def _parse_rate_percent(rate_percent: str) -> int:
         raise InvalidRateError(str(error)) from error
 
 
-def change_rate(
+def _change_rate(
     connection: sqlite3.Connection, work_status_code: str, rate_percent: str, valid_from: date
 ) -> None:
     """給与支給率の新しい適用期間を登録する（`SCN-061`）。
@@ -169,3 +174,18 @@ def change_rate(
                 },
             ),
         )
+
+
+def change_rate(  # noqa: PLR0913 再計算の結果を受け取る引数を加えたため
+    connection: sqlite3.Connection,
+    work_status_code: str,
+    rate_percent: str,
+    valid_from: date,
+    *,
+    on_recalculated: RecalculationListener | None = None,
+) -> None:
+    """支給率を変更し、適用開始日以降の計算済みの月を全社員分、再計算する（`ARC-009`）。"""
+    with transaction(connection):
+        _change_rate(connection, work_status_code, rate_percent, valid_from)
+        recalculation = recalculate_after_change(connection, valid_from, None)
+    notify_recalculated(on_recalculated, recalculation)
