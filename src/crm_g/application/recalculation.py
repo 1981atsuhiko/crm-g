@@ -178,7 +178,9 @@ def _employees_in_month(
     ]
 
 
-def _business_calendar(connection: sqlite3.Connection, first: date, last: date) -> BusinessCalendar:
+def load_business_calendar(
+    connection: sqlite3.Connection, first: date, last: date
+) -> BusinessCalendar:
     rows = connection.execute(
         "SELECT calendar_date FROM business_calendar "
         "WHERE calendar_date BETWEEN ? AND ? AND is_business_day = 1 ORDER BY calendar_date",
@@ -187,7 +189,7 @@ def _business_calendar(connection: sqlite3.Connection, first: date, last: date) 
     return BusinessCalendar(tuple(date.fromisoformat(row[0]) for row in rows))
 
 
-def _pay_items(connection: sqlite3.Connection) -> dict[str, PayItem]:
+def load_pay_items(connection: sqlite3.Connection) -> dict[str, PayItem]:
     rows = connection.execute(
         "SELECT code, name, category, in_monthly_salary, cost_direct, deduction_order, "
         "sort_order FROM pay_item"
@@ -343,8 +345,8 @@ class _CalculationContext:
     def __init__(self, connection: sqlite3.Connection, year_month: str) -> None:
         self.year_month = year_month
         self.first, self.last = _month_range(year_month)
-        self.calendar = _business_calendar(connection, self.first, self.last)
-        self.pay_items = _pay_items(connection)
+        self.calendar = load_business_calendar(connection, self.first, self.last)
+        self.pay_items = load_pay_items(connection)
         self.work_status_rates = _work_status_rates(connection)
         self.cost_coefficient = select_effective_cost_coefficient(
             _cost_coefficients(connection), self.first
@@ -667,7 +669,7 @@ def last_billable_unit_price(
         return None
     join_date, retire_date = _parse_date(row[0]), _parse_date(row[1])
     periods = _work_periods(connection, employee_id, first, last)
-    for day in reversed(_business_calendar(connection, first, last).business_days):
+    for day in reversed(load_business_calendar(connection, first, last).business_days):
         if not is_present(day, join_date, retire_date):
             continue
         for period in periods:
