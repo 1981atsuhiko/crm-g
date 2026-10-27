@@ -1,7 +1,8 @@
 """数値の表示形式（`UID-041`）。"""
 
 from fractions import Fraction
-from math import floor
+
+from crm_g.domain.rounding import percent_one_decimal
 
 DASH = "－"
 
@@ -19,6 +20,4 @@ def format_ratio_percent(ratio: Fraction | None) -> str:
     """
     if ratio is None:
         return DASH
-    tenths = floor(abs(ratio) * 1000 + Fraction(1, 2))
-    sign = "-" if ratio < 0 and tenths != 0 else ""
-    return f"{sign}{tenths // 10}.{tenths % 10}%"
+    return f"{percent_one_decimal(ratio)}%"

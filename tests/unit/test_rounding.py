@@ -4,7 +4,7 @@ from fractions import Fraction
 
 import pytest
 
-from crm_g.domain.rounding import ceil_yen
+from crm_g.domain.rounding import ceil_yen, rate_four_decimals
 
 
 @pytest.mark.parametrize(
@@ -23,3 +23,9 @@ def test_ceil_yen_examples(amount: Fraction, expected: int) -> None:
 def test_ceil_yen_rejects_negative_value() -> None:
     with pytest.raises(ValueError, match="0以上"):
         ceil_yen(Fraction(-1))
+
+
+def test_rate_four_decimals() -> None:
+    assert rate_four_decimals(12500) == "1.2500"
+    assert rate_four_decimals(10000) == "1.0000"
+    assert rate_four_decimals(5) == "0.0005"

@@ -10,7 +10,6 @@
 給与・賞与のテーブルを読まないため、`閲覧` は記録しない（画面設計書 `UID-060`）。
 """
 
-from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -29,9 +28,10 @@ from crm_g.application.forecast import (
 from crm_g.application.operation_log import Operation
 from crm_g.application.sales import (
     AXES,
+    LABEL_COLUMNS,
     PERIOD_UNITS,
-    SalesRow,
     SalesSummary,
+    display_labels,
     last_fiscal_year,
     summarize_sales,
 )
@@ -47,7 +47,6 @@ from crm_g.ui.components.messages import (
 )
 from crm_g.ui.components.month_selector import select_year_month
 
-_LABEL_COLUMNS = {"カテゴリ別": "カテゴリ", "社員別": "社員"}
 _LAST_RESULT_KEY = "sales_forecast_last_result"
 _NEW = "（新規）"
 _FORECAST_MONTHS = 6
@@ -76,17 +75,6 @@ def _select_fiscal_year(*, disabled: bool) -> int:
     return selected
 
 
-def _labels(rows: tuple[SalesRow, ...]) -> list[str | None]:
-    """行の名称（カテゴリ・氏名）。同じ期間に同じ氏名が複数あるときは、社員IDを添える。"""
-    counts = Counter((row.period, row.label) for row in rows if row.employee_id is not None)
-    return [
-        f"{row.label}（{row.employee_id}）"
-        if row.employee_id is not None and counts[(row.period, row.label)] > 1
-        else row.label
-        for row in rows
-    ]
-
-
 def _render_summary(summary: SalesSummary, axis: str) -> None:
     if summary.includes_open_months:
         st.caption("締め前の月を含む")
@@ -98,10 +86,10 @@ def _render_summary(summary: SalesSummary, axis: str) -> None:
         show_status("集計する計算結果がありません。")
         return
 
-    label_column = _LABEL_COLUMNS.get(axis)
+    label_column = LABEL_COLUMNS.get(axis)
     table = []
     chart = []
-    for row, label in zip(summary.rows, _labels(summary.rows), strict=True):
+    for row, label in zip(summary.rows, display_labels(summary.rows), strict=True):
         record: dict[str, str] = {"期間": row.period}
         if label_column is not None:
             record[label_column] = label or ""
