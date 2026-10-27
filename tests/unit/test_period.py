@@ -9,9 +9,11 @@ from crm_g.domain.period import (
     fiscal_half,
     fiscal_year_date_range,
     fiscal_year_label,
+    half_code,
     half_date_range,
     half_label,
     half_months,
+    previous_half,
     selectable_halves,
 )
 
@@ -113,3 +115,9 @@ def test_half_months() -> None:
         (2027, 2),
         (2027, 3),
     )
+
+
+def test_previous_half_and_half_code() -> None:
+    assert previous_half(2026, 2) == (2026, 1)
+    assert previous_half(2026, 1) == (2025, 2)
+    assert half_code(2026, 1) == "2026-H1"

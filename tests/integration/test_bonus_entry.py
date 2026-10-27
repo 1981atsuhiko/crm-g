@@ -23,6 +23,7 @@ from crm_g.application.bonus_entry import (
     NothingToConfirmError,
     StaleBonusCalculationError,
     confirm_bonuses,
+    load_bonus_screen,
     register_manual_bonus,
     save_bonus_calculation,
     save_evaluations,
@@ -385,3 +386,89 @@ def test_failed_manual_bonus_does_not_notify(connection: sqlite3.Connection) -> 
         register_manual_bonus(connection, _manual(employee_id=2), on_recalculated=results.append)
 
     assert results == []
+
+
+# ---- 画面に出す内容 ----
+
+
+def _screen_row(connection: sqlite3.Connection, employee_id: int = 1) -> tuple[object, ...]:
+    row = next(
+        row for row in load_bonus_screen(connection, _HALF).rows if row.employee_id == employee_id
+    )
+    return (row.eval_rank, row.rate_bp, row.bonus_amount, row.is_closed, row.source)
+
+
+def test_screen_rows_follow_the_progress(connection: sqlite3.Connection) -> None:
+    screen = load_bonus_screen(connection, _HALF)
+    assert (screen.pay_month, screen.base_month, screen.evaluation_allowed) == (
+        "2026-10",
+        "2026-09",
+        True,
+    )
+    assert [row.employee_name for row in screen.rows] == ["P"]
+    assert screen.missing == ("P",)
+
+    save_evaluations(connection, _HALF, [_evaluation()])
+    assert _screen_row(connection) == ("A", 12500, None, False, None)
+
+    save_bonus_calculation(connection, _HALF)
+    assert _screen_row(connection) == ("A", 12500, 375000, False, "アプリ計算")
+
+    confirm_bonuses(connection, _HALF)
+    assert _screen_row(connection) == ("A", 12500, 375000, True, "アプリ計算")
+    assert load_bonus_screen(connection, _HALF).missing == ()
+
+
+def test_screen_shows_saved_bonus_of_non_target(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "INSERT INTO bonus (employee_id, eval_half, pay_month, base_type, base_amount, "
+        "bonus_amount, source, is_closed, created_at, updated_at) "
+        "VALUES (2, ?, '2026-10', '月給合計', 300000, 100000, '取込', 1, ?, ?)",
+        (_HALF, _TIMESTAMP, _TIMESTAMP),
+    )
+    connection.commit()
+
+    assert _screen_row(connection, 2) == (None, None, 100000, True, "取込")
+
+
+def test_screen_of_19th_period_shows_saved_bonuses_only(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "INSERT INTO bonus (employee_id, eval_half, pay_month, base_type, base_amount, "
+        "bonus_amount, source, is_closed, created_at, updated_at) "
+        "VALUES (1, '2025-H2', '2026-04', '月給合計', 300000, 250000, '取込', 1, ?, ?)",
+        (_TIMESTAMP, _TIMESTAMP),
+    )
+    connection.commit()
+
+    screen = load_bonus_screen(connection, "2025-H2")
+
+    assert not screen.evaluation_allowed
+    assert [(row.employee_name, row.bonus_amount) for row in screen.rows] == [("P", 250000)]
+
+
+def test_screen_marks_stale_calculation(connection: sqlite3.Connection) -> None:
+    save_evaluations(connection, _HALF, [_evaluation()])
+    save_bonus_calculation(connection, _HALF)
+    save_evaluations(connection, _HALF, [_evaluation(rank="B")])
+
+    row = load_bonus_screen(connection, _HALF).rows[0]
+
+    assert (row.eval_rank, row.bonus_amount, row.needs_recalculation) == ("B", None, True)
+
+
+def test_recalculation_removes_calculation_that_can_no_longer_be_made(
+    connection: sqlite3.Connection,
+) -> None:
+    save_evaluations(connection, _HALF, [_evaluation()])
+    save_bonus_calculation(connection, _HALF)
+    connection.execute("UPDATE employee SET retire_date = '2026-09-30' WHERE id = 1")
+    connection.commit()
+
+    leftover = load_bonus_screen(connection, _HALF).rows[0]
+    assert (leftover.bonus_amount, leftover.needs_recalculation) == (None, True)
+
+    save_bonus_calculation(connection, _HALF)
+
+    assert _bonus(connection) is None
+    assert load_bonus_screen(connection, _HALF).rows == ()
+    assert [log[0] for log in _logs(connection, "bonus")][-1] == "削除"

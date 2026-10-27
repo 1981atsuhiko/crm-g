@@ -164,7 +164,8 @@ def list_bonus_targets(connection: sqlite3.Connection, eval_half: str) -> tuple[
     if business_calendar.day_count == 0:
         raise NoBaseMonthCalendarError(
             f"基準月（{year_month_text(schedule.base_year, schedule.base_month)}）の"
-            "営業日カレンダーがありません"
+            "営業日カレンダーがありません。「設定」→「営業日カレンダー」で、"
+            f"{schedule.base_year}年のカレンダーを作成してください"
         )
     rule = _effective_rule(connection, pay_first)
     pay_items = load_pay_items(connection)

@@ -96,3 +96,13 @@ def half_months(fiscal_year: int, half: int) -> tuple[tuple[int, int], ...]:
         (start.year + (start.month - 1 + offset) // 12, (start.month - 1 + offset) % 12 + 1)
         for offset in range(6)
     )
+
+
+def previous_half(fiscal_year: int, half: int) -> tuple[int, int]:
+    """1つ前の半期を返す（上期の前は、前の年度の下期）。"""
+    return (fiscal_year, 1) if half == 2 else (fiscal_year - 1, 2)
+
+
+def half_code(fiscal_year: int, half: int) -> str:
+    """半期コード（`YYYY-H1`／`YYYY-H2`。データ設計書 `DBD-006`）を返す。"""
+    return f"{fiscal_year}-H{half}"

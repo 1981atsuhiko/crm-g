@@ -12,12 +12,13 @@
 
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from crm_g.application.bonus import (
+    BonusCalculation,
     calculate_bonuses,
     check_bonus_target,
     list_bonus_targets,
@@ -34,6 +35,7 @@ from crm_g.application.recalculation import (
     notify_recalculated,
     recalculate_after_change,
 )
+from crm_g.domain.bonus import bonus_schedule
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 from crm_g.infrastructure.db import transaction
 
@@ -176,12 +178,52 @@ def save_evaluations(
     return saved
 
 
+def _delete_stale_calculations(
+    connection: sqlite3.Connection, eval_half: str, calculated_ids: set[int]
+) -> None:
+    for row in connection.execute(
+        "SELECT employee_id, base_type, base_amount, eval_rank, rate_bp, bonus_amount FROM bonus "
+        "WHERE eval_half = ? AND source = ? AND is_closed = 0",
+        (eval_half, _SOURCE_CALCULATED),
+    ).fetchall():
+        if row[0] in calculated_ids:
+            continue
+        connection.execute(
+            "DELETE FROM bonus WHERE employee_id = ? AND eval_half = ?", (row[0], eval_half)
+        )
+        record_operation_log(
+            connection,
+            Operation.DELETE,
+            "bonus",
+            OperationLogDetail(
+                target_key=f"{row[0]}:{eval_half}",
+                before_value=dict(
+                    zip(
+                        ("base_type", "base_amount", "eval_rank", "rate_bp", "bonus_amount"),
+                        row[1:],
+                        strict=True,
+                    )
+                ),
+            ),
+        )
+
+
 def save_bonus_calculation(connection: sqlite3.Connection, eval_half: str) -> int:
-    """賞与を計算して保存する（未確定のアプリ計算の行として）。保存した人数を返す。"""
+    """賞与を計算して保存する（未確定のアプリ計算の行として）。保存した人数を返す。
+
+    計算し直して計算できなくなった社員（評価・掛け率がなくなった、対象者でなくなった）の
+    未確定の計算結果は消す。確定前の計算結果は導出したデータであり、残すと古い賞与を確定
+    できなくなるため（データ設計書 10章 No.10 の例外）。`削除` を記録する。
+    """
     saved = 0
     with transaction(connection):
         calculation = calculate_bonuses(connection, eval_half)
         now = to_iso8601(utc_now())
+        _delete_stale_calculations(
+            connection,
+            eval_half,
+            {row.target.employee_id for row in calculation.rows if row.bonus_amount is not None},
+        )
         for row in calculation.rows:
             if row.bonus_amount is None:
                 continue
@@ -399,3 +441,128 @@ def register_manual_bonus(
             connection, _pay_first(data.eval_half), [data.employee_id]
         )
     notify_recalculated(on_recalculated, recalculation)
+
+
+@dataclass(frozen=True)
+class BonusScreenRow:
+    """賞与の画面の一覧の1行（`SCN-040`）。未計算・未登録の値は `None`。"""
+
+    employee_id: int
+    employee_name: str
+    base_type: str | None
+    base_amount: int | None
+    eval_rank: str | None
+    rate_bp: int | None
+    bonus_amount: int | None
+    evaluator: str | None
+    comment: str | None
+    is_closed: bool
+    source: str | None
+    needs_recalculation: bool = False
+
+
+@dataclass(frozen=True)
+class BonusScreen:
+    """賞与の画面に出す内容。`evaluation_allowed` が偽の半期は、評価の入力・計算をしない。"""
+
+    eval_half: str
+    pay_month: str
+    base_month: str
+    evaluation_allowed: bool
+    rows: tuple[BonusScreenRow, ...]
+    missing: tuple[str, ...]
+
+
+def _saved_bonuses(connection: sqlite3.Connection, eval_half: str) -> dict[int, tuple[Any, ...]]:
+    rows = connection.execute(
+        "SELECT b.employee_id, e.name, b.base_type, b.base_amount, b.eval_rank, b.rate_bp, "
+        "b.bonus_amount, b.is_closed, b.source "
+        "FROM bonus b JOIN employee e ON e.id = b.employee_id "
+        "WHERE b.eval_half = ? ORDER BY COALESCE(e.name_kana, e.name), e.id",
+        (eval_half,),
+    ).fetchall()
+    return {row[0]: tuple(row) for row in rows}
+
+
+def _saved_row(saved: tuple[Any, ...], evaluation: tuple[Any, ...] | None) -> BonusScreenRow:
+    return BonusScreenRow(
+        employee_id=saved[0],
+        employee_name=saved[1],
+        base_type=saved[2],
+        base_amount=saved[3],
+        eval_rank=saved[4],
+        rate_bp=saved[5],
+        bonus_amount=saved[6],
+        evaluator=evaluation[1] if evaluation else None,
+        comment=evaluation[2] if evaluation else None,
+        is_closed=bool(saved[7]),
+        source=saved[8],
+    )
+
+
+def load_bonus_screen(connection: sqlite3.Connection, eval_half: str) -> BonusScreen:
+    """賞与の画面の内容を返す（`SCN-040`）。
+
+    20期上期以降の半期は、対象者ごとに、評価・今の掛け率・保存済みの賞与を並べる。
+    確定済み・取込・手入力の賞与は、保存した値をそのまま出す。対象者でなくなった社員の
+    賞与も、保存されていれば出す。19期の半期は、保存済みの賞与（取込・手入力）だけを出す。
+    """
+    schedule = bonus_schedule(eval_half)
+    pay_month = pay_month_of(eval_half)
+    base_month = f"{schedule.base_year:04d}-{schedule.base_month:02d}"
+    saved = _saved_bonuses(connection, eval_half)
+    evaluations = {
+        row[0]: tuple(row)
+        for row in connection.execute(
+            "SELECT employee_id, evaluator, comment FROM evaluation WHERE eval_half = ?",
+            (eval_half,),
+        ).fetchall()
+    }
+    if eval_half < FIRST_EVALUATION_HALF:
+        rows = tuple(
+            _saved_row(row, evaluations.get(employee_id)) for employee_id, row in saved.items()
+        )
+        return BonusScreen(eval_half, pay_month, base_month, False, rows, ())
+
+    calculation: BonusCalculation = calculate_bonuses(connection, eval_half)
+    screen_rows: list[BonusScreenRow] = []
+    for row in calculation.rows:
+        employee_id = row.target.employee_id
+        stored = saved.pop(employee_id, None)
+        if stored is not None and (stored[7] or stored[8] != _SOURCE_CALCULATED):
+            screen_rows.append(_saved_row(stored, evaluations.get(employee_id)))
+            continue
+        evaluation = evaluations.get(employee_id)
+        current = (
+            row.target.base_type,
+            row.target.base_amount,
+            row.eval_rank,
+            row.rate_bp,
+            row.bonus_amount,
+        )
+        # 保存済みの計算結果が、今の評価・掛け率・基準額と食い違うときは、要再計算とする。
+        stale = stored is not None and tuple(stored[2:7]) != current
+        screen_rows.append(
+            BonusScreenRow(
+                employee_id=employee_id,
+                employee_name=row.target.employee_name,
+                base_type=row.target.base_type,
+                base_amount=row.target.base_amount,
+                eval_rank=row.eval_rank,
+                rate_bp=row.rate_bp,
+                bonus_amount=None if stored is None or stale else stored[6],
+                evaluator=evaluation[1] if evaluation else None,
+                comment=evaluation[2] if evaluation else None,
+                is_closed=False,
+                source=stored[8] if stored is not None else None,
+                needs_recalculation=stale,
+            )
+        )
+    for employee_id, stored in saved.items():
+        leftover = _saved_row(stored, evaluations.get(employee_id))
+        if not leftover.is_closed and leftover.source == _SOURCE_CALCULATED:
+            # 対象者でなくなった社員の未確定の計算結果。計算し直すと消える。
+            leftover = replace(leftover, bonus_amount=None, needs_recalculation=True)
+        screen_rows.append(leftover)
+    missing = tuple(row.target.employee_name for row in calculation.missing)
+    return BonusScreen(eval_half, pay_month, base_month, True, tuple(screen_rows), missing)
