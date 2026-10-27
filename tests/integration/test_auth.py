@@ -185,6 +185,63 @@ def test_change_passcode_leaves_credential_valid_when_new_passcode_is_invalid(
         verify_passcode(connection, _PASSCODE)
 
 
+def _operation_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    """操作ログの操作ごとの件数を返す。"""
+    rows = connection.execute(
+        "SELECT operation, COUNT(*) FROM operation_log GROUP BY operation"
+    ).fetchall()
+    return {operation: count for operation, count in rows}
+
+
+def test_change_passcode_checks_new_passcode_before_verifying_current(db_path: Path) -> None:
+    """新しいパスコードの不一致は、現在のパスコードの確認より先に検査する。
+
+    現在のパスコードが誤っていても、新しい入力の誤りで止まり、`認証失敗` の記録も
+    失敗回数の加算も行わない。
+    """
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+        with pytest.raises(PasscodeMismatchError):
+            change_passcode(connection, "wrong@3sss.co.jp", "jiro@3sss.co.jp", "saburo@3sss.co.jp")
+
+        failed_count = connection.execute(
+            "SELECT failed_count FROM app_credential WHERE id = 1"
+        ).fetchone()[0]
+        assert failed_count == 0
+        assert _operation_counts(connection) == {"パスコード設定": 1}
+
+
+def test_change_passcode_with_invalid_new_format_does_not_record_auth_success(
+    db_path: Path,
+) -> None:
+    """新しいパスコードの形式の誤りでは、現在のパスコードを確認しない（`認証成功` を残さない）。"""
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+        with pytest.raises(InvalidPasscodeFormatError):
+            change_passcode(connection, _PASSCODE, "not-an-email", "not-an-email")
+
+        assert _operation_counts(connection) == {"パスコード設定": 1}
+        verify_passcode(connection, _PASSCODE)
+
+
+def test_change_passcode_with_wrong_current_records_auth_failure(db_path: Path) -> None:
+    """現在のパスコードが誤っているときは、`認証失敗` を記録し、失敗回数を加算する（`SCD-008`）。"""
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+        new_passcode = "jiro@3sss.co.jp"
+        with pytest.raises(InvalidPasscodeError):
+            change_passcode(connection, "wrong@3sss.co.jp", new_passcode, new_passcode)
+
+        failed_count = connection.execute(
+            "SELECT failed_count FROM app_credential WHERE id = 1"
+        ).fetchone()[0]
+        assert failed_count == 1
+        assert _operation_counts(connection) == {"パスコード設定": 1, "認証失敗": 1}
+
+
 def test_change_passcode_succeeds_and_logs_passcode_set(db_path: Path) -> None:
     with open_connection(db_path) as connection:
         setup_passcode(connection, _PASSCODE, _PASSCODE)

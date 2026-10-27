@@ -180,3 +180,18 @@ def test_leaving_the_export_page_discards_the_prepared_csv(localappdata: Path) -
 
     assert not app.exception
     assert EXPORT_STATE_KEY not in app.session_state
+
+
+def test_authenticated_session_can_open_passcode_change(localappdata: Path) -> None:
+    db_path = localappdata / "crm-g" / "crm-g.db"
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+    app = AppTest.from_file(str(_APP_PATH), default_timeout=_APPTEST_TIMEOUT_SECONDS)
+    app.session_state[AUTHENTICATED_KEY] = True
+    app = app.run()
+    app.switch_page("views/passcode_change.py")
+    app.run()
+
+    assert _titles(app) == ["パスコード変更"]
+    assert not app.exception
