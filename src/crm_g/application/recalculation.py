@@ -39,7 +39,7 @@ from crm_g.domain.payroll import (
     calculate_payroll,
 )
 from crm_g.domain.period_overlap import periods_overlap
-from crm_g.domain.rate_history import RateHistoryEntry
+from crm_g.domain.rate_history import RateHistoryEntry, determine_unit_price
 from crm_g.domain.revenue import BillingPeriod, calculate_revenue
 from crm_g.domain.salary_history import (
     SalaryHistory,
@@ -583,3 +583,30 @@ def list_calculation_errors(
         if isinstance(outcome, CalculationErrorReason):
             errors.append(CalculationError(employee.id, employee.name, year_month, outcome))
     return tuple(errors)
+
+
+def last_billable_unit_price(
+    connection: sqlite3.Connection, employee_id: int, year_month: str
+) -> int | None:
+    """売上計上の最後の在籍営業日の単価を返す（画面設計書 `SCN-032` の単価の列）。
+
+    単価は保存しないため、表示のたびに単価履歴から求める。売上計上の営業日がない月は
+    `None`（画面では `－`）。
+    """
+    first, last = _month_range(year_month)
+    row = connection.execute(
+        "SELECT join_date, retire_date FROM employee WHERE id = ?", (employee_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    join_date, retire_date = _parse_date(row[0]), _parse_date(row[1])
+    periods = _work_periods(connection, employee_id, first, last)
+    for day in reversed(_business_calendar(connection, first, last).business_days):
+        if not is_present(day, join_date, retire_date):
+            continue
+        for period in periods:
+            if period.is_billable and is_within_period(day, period.start_date, period.end_date):
+                return determine_unit_price(
+                    day, period.assignment_id, _rate_histories(connection, employee_id)
+                )
+    return None
