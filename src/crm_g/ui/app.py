@@ -29,6 +29,7 @@ _RAISE_LIST_PATH = "raise_list"
 _MONTHLY_PAYROLL_PATH = "monthly_payroll"
 _BONUS_PATH = "bonus"
 _WORK_PATH = "work"
+_SALES_PATH = "sales"
 
 
 def _is_passcode_set() -> bool:
@@ -50,7 +51,7 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
         return [_page("setup.py", _SETUP_PATH, title="パスコード設定", default=True)]
     if not _is_authenticated():
         return [_page("login.py", _LOGIN_PATH, title="ログイン", default=True)]
-    # PH-12 以降で、正式な画面（売上・ダッシュボードなど）を追加する。
+    # PH-13 以降で、出力・バックアップ・操作ログ・データ取込の画面を追加する。
     return {
         "ダッシュボード": [_page("home.py", _HOME_PATH, title="ダッシュボード", default=True)],
         "社員": [_page("employee.py", _EMPLOYEE_PATH, title="社員")],
@@ -60,7 +61,10 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
             _page("monthly_payroll.py", _MONTHLY_PAYROLL_PATH, title="月次給与計算"),
         ],
         "賞与": [_page("bonus.py", _BONUS_PATH, title="賞与")],
-        "稼働・売上": [_page("work.py", _WORK_PATH, title="稼働")],
+        "稼働・売上": [
+            _page("work.py", _WORK_PATH, title="稼働"),
+            _page("sales.py", _SALES_PATH, title="売上"),
+        ],
         "設定": [
             _page("business_calendar.py", _BUSINESS_CALENDAR_PATH, title="営業日カレンダー"),
             _page("work_status.py", _WORK_STATUS_PATH, title="稼働状態"),
