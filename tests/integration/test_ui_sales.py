@@ -1,4 +1,4 @@
-"""売上画面の試験（`SCN-051` の実績の集計、`TC-FUN-012`）。"""
+"""売上画面の実績の集計の試験（`SCN-051`、`TC-FUN-012`）。"""
 
 from datetime import date
 from pathlib import Path
@@ -108,7 +108,7 @@ def test_fiscal_year_without_results(db_path: Path) -> None:
     app.selectbox(key="sales_fiscal_year").set_value(2025)
     app = app.run()
 
-    assert not app.dataframe
+    assert not app.tabs[0].dataframe
     assert any("集計する計算結果がありません" in info.value for info in app.info)
 
 
