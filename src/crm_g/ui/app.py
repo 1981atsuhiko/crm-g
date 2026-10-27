@@ -26,6 +26,7 @@ _BONUS_RULE_PATH = "bonus_rule"
 _EMPLOYEE_PATH = "employee"
 _SALARY_HISTORY_PATH = "salary_history"
 _RAISE_LIST_PATH = "raise_list"
+_MONTHLY_PAYROLL_PATH = "monthly_payroll"
 _WORK_PATH = "work"
 
 
@@ -55,6 +56,7 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
         "給与": [
             _page("salary_history.py", _SALARY_HISTORY_PATH, title="給与履歴の登録"),
             _page("raise_list.py", _RAISE_LIST_PATH, title="昇給一覧"),
+            _page("monthly_payroll.py", _MONTHLY_PAYROLL_PATH, title="月次給与計算"),
         ],
         "稼働・売上": [_page("work.py", _WORK_PATH, title="稼働")],
         "設定": [
