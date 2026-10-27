@@ -1,5 +1,6 @@
 """UIエントリポイントの試験（TC-SCN-001）。"""
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ from streamlit.testing.v1 import AppTest
 from crm_g.application.auth import setup_passcode
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.migration import apply_migrations
-from crm_g.ui.session import AUTHENTICATED_KEY
+from crm_g.ui.session import AUTHENTICATED_KEY, EXPORT_STATE_KEY
 
 _APP_PATH = Path(__file__).resolve().parents[2] / "src" / "crm_g" / "ui" / "app.py"
 _DDL_DIR = Path(__file__).resolve().parents[2] / "DDL"
@@ -149,3 +150,33 @@ def test_authenticated_session_can_open_employee_list(localappdata: Path) -> Non
 
     assert _titles(app) == ["社員一覧"]
     assert not app.exception
+
+
+def test_leaving_the_export_page_discards_the_prepared_csv(localappdata: Path) -> None:
+    db_path = localappdata / "crm-g" / "crm-g.db"
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+    app = AppTest.from_file(str(_APP_PATH), default_timeout=_APPTEST_TIMEOUT_SECONDS)
+    app.session_state[AUTHENTICATED_KEY] = True
+    app = app.run()
+    app.switch_page("views/export.py")
+    app = app.run()
+    # 画面の既定の条件（今日の月）で作成済みの CSV を置く。
+    today = date.today()
+    condition = f"{today.year:04d}-{today.month:02d}"
+    app.session_state[EXPORT_STATE_KEY] = {
+        "kind": "人事連携",
+        "condition": condition,
+        "file_name": f"人事連携_{condition}.csv",
+        "content": b"x",
+    }
+    app = app.run()
+    assert not app.exception
+    assert EXPORT_STATE_KEY in app.session_state
+
+    app.switch_page("views/home.py")
+    app = app.run()
+
+    assert not app.exception
+    assert EXPORT_STATE_KEY not in app.session_state

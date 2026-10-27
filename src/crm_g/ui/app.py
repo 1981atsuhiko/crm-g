@@ -11,7 +11,7 @@ import streamlit as st
 from crm_g.application.auth import is_passcode_set
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
-from crm_g.ui.session import AUTHENTICATED_KEY
+from crm_g.ui.session import AUTHENTICATED_KEY, EXPORT_STATE_KEY
 
 _VIEWS_DIR = Path(__file__).parent / "views"
 
@@ -30,6 +30,7 @@ _MONTHLY_PAYROLL_PATH = "monthly_payroll"
 _BONUS_PATH = "bonus"
 _WORK_PATH = "work"
 _SALES_PATH = "sales"
+_EXPORT_PATH = "export"
 
 
 def _is_passcode_set() -> bool:
@@ -51,7 +52,7 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
         return [_page("setup.py", _SETUP_PATH, title="パスコード設定", default=True)]
     if not _is_authenticated():
         return [_page("login.py", _LOGIN_PATH, title="ログイン", default=True)]
-    # PH-13 以降で、出力・バックアップ・操作ログ・データ取込の画面を追加する。
+    # PH-14 以降で、バックアップ・操作ログ・データ取込の画面を追加する。
     return {
         "ダッシュボード": [_page("home.py", _HOME_PATH, title="ダッシュボード", default=True)],
         "社員": [_page("employee.py", _EMPLOYEE_PATH, title="社員")],
@@ -65,6 +66,7 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
             _page("work.py", _WORK_PATH, title="稼働"),
             _page("sales.py", _SALES_PATH, title="売上"),
         ],
+        "データ": [_page("export.py", _EXPORT_PATH, title="出力")],
         "設定": [
             _page("business_calendar.py", _BUSINESS_CALENDAR_PATH, title="営業日カレンダー"),
             _page("work_status.py", _WORK_STATUS_PATH, title="稼働状態"),
@@ -76,7 +78,11 @@ def _build_pages() -> list[st.Page] | dict[str, list[st.Page]]:
 
 
 def main() -> None:
-    st.navigation(_build_pages()).run()
+    page = st.navigation(_build_pages())
+    if page.url_path != _EXPORT_PATH:
+        # 出力画面を離れたら、作成済みの CSV を破棄する（画面設計書 7.2）。
+        st.session_state.pop(EXPORT_STATE_KEY, None)
+    page.run()
 
 
 main()
