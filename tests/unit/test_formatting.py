@@ -1,10 +1,11 @@
 """数値の表示形式の試験（`UID-041`、`TC-SCN-025`）。"""
 
+from datetime import UTC, datetime
 from fractions import Fraction
 
 import pytest
 
-from crm_g.ui.components.formatting import format_ratio_percent, format_yen
+from crm_g.ui.components.formatting import format_datetime, format_ratio_percent, format_yen
 
 
 @pytest.mark.parametrize(
@@ -28,3 +29,8 @@ def test_format_yen() -> None:
     assert format_yen(1234567) == "1,234,567"
     assert format_yen(-5) == "-5"
     assert format_yen(None) == "－"
+
+
+def test_format_datetime_uses_japan_time() -> None:
+    # UTC の 2026-10-31 15:30 は、日本時間の 2026-11-01 00:30。
+    assert format_datetime(datetime(2026, 10, 31, 15, 30, tzinfo=UTC)) == "2026/11/01 00:30"

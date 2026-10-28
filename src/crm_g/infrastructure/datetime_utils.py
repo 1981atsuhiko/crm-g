@@ -5,7 +5,10 @@
 （Python実装ルール）。
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
+
+# 画面に出す日時と、画面で選ぶ日付の時刻帯（日本時間、UTC+9。夏時間はない。画面設計書 `UID-041`）。
+JST = timezone(timedelta(hours=9), "JST")
 
 
 def utc_now() -> datetime:

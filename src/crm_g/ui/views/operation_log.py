@@ -1,27 +1,32 @@
 """操作ログ画面（`SCN-067`）。
 
-期間（日本時間の日付）と操作の種類で絞り込み、操作ログを新しい順に一覧にする。
+期間（日本時間の日付。`UID-041`）と操作の種類で絞り込み、操作ログを新しい順に一覧にする。
 1回の表示は最大1,000件で、超えるときは「絞り込んでください」と表示する（`UID-080`）。
 変更前・変更後は、JSON の文字列のまま表示する（`SCD-022`）。この画面を開いても、
 絞り込みの条件を変えても、`閲覧` は記録しない（`UID-060`。ユーザー承認 2026-10-27）。
 CSV の出力・編集・削除は設けない（`SCD-024`）。
 """
 
-from datetime import date
+from datetime import datetime
 
 import streamlit as st
 
 from crm_g.application.operation_log import (
-    JST,
     OPERATION_LOG_DISPLAY_LIMIT,
     Operation,
     OperationLogRow,
     search_operation_logs,
 )
+from crm_g.infrastructure.datetime_utils import JST
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
-from crm_g.ui.components.formatting import DASH
-from crm_g.ui.components.messages import show_errors, show_status, show_warning
+from crm_g.ui.components.formatting import DASH, format_datetime
+from crm_g.ui.components.messages import (
+    show_errors,
+    show_status,
+    show_unexpected_error,
+    show_warning,
+)
 
 # 操作の種類の選択肢。`Operation` の値が増えたときは、自動で選択肢に加わる。
 _OPERATION_OPTIONS = [operation.value for operation in Operation]
@@ -48,7 +53,7 @@ def _render_table(rows: tuple[OperationLogRow, ...]) -> None:
     st.dataframe(
         [
             {
-                "日時": row.occurred_at.astimezone(JST).strftime("%Y/%m/%d %H:%M"),
+                "日時": format_datetime(row.occurred_at),
                 "操作": row.operation,
                 "対象テーブル": row.target_table,
                 "対象キー": _text_or_dash(row.target_key),
@@ -67,7 +72,8 @@ def render() -> None:
     st.title("操作ログ")
     show_warning(_SENSITIVE_NOTICE)
 
-    today = date.today()
+    # 既定の期間は、日本時間の今日を基準にする（`UID-041`・`UID-062`）。
+    today = datetime.now(JST).date()
     start_column, end_column = st.columns(2)
     with start_column:
         start_date = st.date_input(
@@ -82,17 +88,26 @@ def render() -> None:
         key="operation_log_operations",
     )
 
-    if start_date > end_date:
-        show_errors(["開始日は、終了日以前の日付にしてください。"])
+    if not selected_operations:
+        show_status("操作の種類を1つ以上選んでください。")
         return
 
-    with open_connection(get_app_paths().db_path) as connection:
-        result = search_operation_logs(
-            connection,
-            start_date,
-            end_date,
-            [Operation(value) for value in selected_operations],
-        )
+    try:
+        with open_connection(get_app_paths().db_path) as connection:
+            result = search_operation_logs(
+                connection,
+                start_date,
+                end_date,
+                [Operation(value) for value in selected_operations],
+            )
+    except ValueError as error:
+        # 期間の前後の検査は、アプリケーション層が行う（`UID-050`）。
+        show_errors([str(error)])
+        return
+    except Exception:
+        # 想定外の例外から、原因を画面に出さないための最終防波堤（ARC-018）。
+        show_unexpected_error()
+        return
 
     if result.exceeds_limit:
         show_warning(_EXCEEDS_LIMIT_MESSAGE)

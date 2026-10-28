@@ -1,14 +1,16 @@
 """操作ログ画面の試験（`SCN-067`、TC-SCN-022）。"""
 
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
 from streamlit.testing.v1 import AppTest
 
+import crm_g.application.operation_log as operation_log_module
 from crm_g.application.operation_log import OPERATION_LOG_DISPLAY_LIMIT, Operation
 from crm_g.infrastructure.db import open_connection, transaction
 from crm_g.infrastructure.migration import apply_migrations
+from crm_g.ui.components.messages import UNEXPECTED_ERROR_MESSAGE
 
 _VIEW_PATH = (
     Path(__file__).resolve().parents[2] / "src" / "crm_g" / "ui" / "views" / "operation_log.py"
@@ -196,3 +198,45 @@ def test_viewing_and_filtering_do_not_record_view(db_path: Path) -> None:
 
     assert _log_count(db_path) == before_count
     assert not app.exception
+
+
+def test_no_operations_selected_shows_guidance(db_path: Path) -> None:
+    app = _new_app()
+    app.multiselect(key="operation_log_operations").set_value([])
+    app = app.run()
+
+    assert any("1つ以上選んでください" in info.value for info in app.info)
+    assert not app.dataframe
+
+
+def test_unexpected_error_shows_generic_message(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("secret detail")
+
+    monkeypatch.setattr(operation_log_module, "search_operation_logs", _fail)
+    app = _new_app()
+
+    assert [error.value for error in app.error] == [UNEXPECTED_ERROR_MESSAGE]
+
+
+def test_over_the_limit_shows_the_displayed_count(db_path: Path) -> None:
+    app = _set_period(_new_app(), date(2026, 10, 1), date(2026, 10, 31))
+
+    assert any(caption.value == "1,000件" for caption in app.caption)
+
+
+def test_default_period_shows_logs_of_today(db_path: Path) -> None:
+    now = datetime.now(UTC).replace(microsecond=0)
+    with open_connection(db_path) as connection, transaction(connection):
+        connection.execute(
+            "INSERT INTO operation_log (occurred_at, operation, target_table, target_key) "
+            "VALUES (?, '削除', 'employee', 'today')",
+            (now.strftime("%Y-%m-%dT%H:%M:%S.000000Z"),),
+        )
+
+    app = _new_app()
+
+    table = app.dataframe[0].value
+    assert "today" in list(table["対象キー"])

@@ -38,6 +38,7 @@ from crm_g.application.recalculation import (
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
 from crm_g.ui.components.confirm_dialog import confirm_dialog
+from crm_g.ui.components.formatting import format_datetime
 from crm_g.ui.components.messages import (
     UNEXPECTED_ERROR_MESSAGE,
     show_errors,
@@ -294,9 +295,7 @@ def render() -> None:
 
     if status.is_closed:
         closed_at = (
-            f"（{status.closed_at.astimezone().strftime('%Y-%m-%d %H:%M')}）"
-            if status.closed_at is not None
-            else ""
+            f"（{format_datetime(status.closed_at)}）" if status.closed_at is not None else ""
         )
         st.write(f"状態：締め済み{closed_at}")
     else:

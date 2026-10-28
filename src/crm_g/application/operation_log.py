@@ -10,14 +10,11 @@ import json
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from enum import StrEnum
 from typing import Any
 
-from crm_g.infrastructure.datetime_utils import from_iso8601, to_iso8601, utc_now
-
-# 操作ログ画面の期間と日時の表示に使う日本時間（UTC+9。夏時間はない）。
-JST = timezone(timedelta(hours=9), "JST")
+from crm_g.infrastructure.datetime_utils import JST, from_iso8601, to_iso8601, utc_now
 
 # 操作ログ画面の1回の表示の上限（設計判断 `UID-080`）。
 OPERATION_LOG_DISPLAY_LIMIT = 1000

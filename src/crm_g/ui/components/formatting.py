@@ -1,8 +1,10 @@
 """数値の表示形式（`UID-041`）。"""
 
+from datetime import datetime
 from fractions import Fraction
 
 from crm_g.domain.rounding import percent_one_decimal
+from crm_g.infrastructure.datetime_utils import JST
 
 DASH = "－"
 
@@ -21,3 +23,8 @@ def format_ratio_percent(ratio: Fraction | None) -> str:
     if ratio is None:
         return DASH
     return f"{percent_one_decimal(ratio)}%"
+
+
+def format_datetime(value: datetime) -> str:
+    """日時を、日本時間の `YYYY/MM/DD HH:MM` で表示する（`UID-041`）。"""
+    return value.astimezone(JST).strftime("%Y/%m/%d %H:%M")
