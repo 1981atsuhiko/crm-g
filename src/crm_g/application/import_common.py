@@ -119,7 +119,7 @@ def normalize_free_text(raw: str) -> str | None:
 _FORMAT_CATEGORY = "Cf"
 
 
-def _normalize_header(raw: str) -> str:
+def normalize_header(raw: str) -> str:
     """見出しを、NFKC 正規化・書式文字の除去・前後の空白の除去をした値にする（`MIG-021`）。
 
     書式文字（Unicode の一般カテゴリ `Cf`。2つ目の BOM、ゼロ幅スペースなど）は、
@@ -156,7 +156,7 @@ class ColumnLayout:
 
     def __post_init__(self) -> None:
         """正規化した後の列名の重複を検査する。メッセージには、列名を含めない。"""
-        keys = [_normalize_header(name) for name in (*self.defined, *self.excluded)]
+        keys = [normalize_header(name) for name in (*self.defined, *self.excluded)]
         if len(set(keys)) != len(keys):
             raise ValueError("列の定義に、正規化すると同じになる列名があります")
 
@@ -176,7 +176,8 @@ class HeaderMatch:
     issues: tuple[ImportIssue, ...]
 
 
-_HEADER_LINE_NUMBER = 1
+HEADER_LINE_NUMBER = 1
+"""見出し行の行番号（見出しのエラーの行番号）。"""
 
 
 def match_headers(headers: Sequence[str], layout: ColumnLayout) -> HeaderMatch:
@@ -189,8 +190,8 @@ def match_headers(headers: Sequence[str], layout: ColumnLayout) -> HeaderMatch:
     ファイル全体の `E002`（行番号・列名なし）だけを返す。見出しの文字列がデータの値である
     おそれがあるため、`E004`・`E005` の列名は、少なくとも1列が一致したときにだけ出す（`MIG-005`）。
     """
-    defined_by_key = {_normalize_header(name): name for name in layout.defined}
-    excluded_keys = {_normalize_header(name) for name in layout.excluded}
+    defined_by_key = {normalize_header(name): name for name in layout.defined}
+    excluded_keys = {normalize_header(name) for name in layout.excluded}
 
     issues: list[ImportIssue] = []
     positions: dict[str, int] = {}
@@ -198,11 +199,11 @@ def match_headers(headers: Sequence[str], layout: ColumnLayout) -> HeaderMatch:
     excluded_positions: set[int] = set()
     seen: set[str] = set()
     for position, raw in enumerate(headers):
-        key = _normalize_header(raw)
+        key = normalize_header(raw)
         if not key:
             continue
         if key in seen:
-            issues.append(ImportIssue(_HEADER_LINE_NUMBER, key, ImportErrorCode.DUPLICATE_COLUMN))
+            issues.append(ImportIssue(HEADER_LINE_NUMBER, key, ImportErrorCode.DUPLICATE_COLUMN))
             continue
         seen.add(key)
         if key in defined_by_key:
@@ -211,7 +212,7 @@ def match_headers(headers: Sequence[str], layout: ColumnLayout) -> HeaderMatch:
             excluded_columns.append(key)
             excluded_positions.add(position)
         else:
-            issues.append(ImportIssue(_HEADER_LINE_NUMBER, key, ImportErrorCode.UNKNOWN_COLUMN))
+            issues.append(ImportIssue(HEADER_LINE_NUMBER, key, ImportErrorCode.UNKNOWN_COLUMN))
 
     if not positions and not excluded_positions:
         return HeaderMatch(
@@ -222,12 +223,12 @@ def match_headers(headers: Sequence[str], layout: ColumnLayout) -> HeaderMatch:
         )
 
     issues.extend(
-        ImportIssue(_HEADER_LINE_NUMBER, name, ImportErrorCode.MISSING_COLUMN)
+        ImportIssue(HEADER_LINE_NUMBER, name, ImportErrorCode.MISSING_COLUMN)
         for name in layout.required
         if name not in positions
     )
     issues.extend(
-        ImportIssue(_HEADER_LINE_NUMBER, "／".join(group), ImportErrorCode.MISSING_COLUMN)
+        ImportIssue(HEADER_LINE_NUMBER, "／".join(group), ImportErrorCode.MISSING_COLUMN)
         for group in layout.required_one_of
         if not any(name in positions for name in group)
     )
