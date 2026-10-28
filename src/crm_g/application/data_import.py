@@ -4,10 +4,12 @@
 
 - `check_import`（確認の実行）：読み込み・名寄せ・整形・検証だけを行い、DB を変更しない。
   操作ログも記録しない（`MIG-004`、`MIG-055`）
-- `run_import`（取込の実行）：検証 → 取込前のバックアップ（`MIG-053`）→ `BEGIN IMMEDIATE` →
-  読み込みから検証までのやり直し（DB を読み直す）→ 投入 → 再計算（`MIG-054`）→
-  操作ログ `取込` を1件（`MIG-055`）→ コミット。エラーが1件でもあれば何も投入しない
-  （`MIG-002`）。例外はロールバックして再送出する（`MIG-052`）
+- `run_import`（取込の実行）：検証 → `BEGIN IMMEDIATE`（書き込みのロック）→ 取込前の
+  バックアップ（`MIG-053`。別の接続で読み取って作る）→ 読み込みから検証までのやり直し
+  （DB を読み直す）→ 投入 → 再計算（`MIG-054`）→ 操作ログ `取込` を1件（`MIG-055`）→
+  コミット。ロックの後にバックアップを作るため、バックアップと投入の間に、ほかのタブの
+  更新は入らない。エラーが1件でもあれば何も投入しない（`MIG-002`）。例外はロールバックして
+  再送出する（`MIG-052`）。トランザクションの中からは呼べない
 
 取込の種類ごとの処理は、`_DEFINITIONS` の登録表で差し替える。種類を足すときは、
 `ImportKind` に識別子を足し、検証の関数（`ImportValidator`）を書いて登録表に加える。
@@ -31,7 +33,7 @@ from crm_g.application.import_employee import insert_employees, validate_employe
 from crm_g.application.import_matching import EmployeeMatch, UnmatchedPerson, unmatched_people
 from crm_g.application.operation_log import Operation, OperationLogDetail, record_operation_log
 from crm_g.application.recalculation import RecalculationResult, recalculate_range
-from crm_g.infrastructure.backup import create_backup
+from crm_g.infrastructure.backup import BackupWriteError, write_backup
 from crm_g.infrastructure.db import transaction
 
 _logger = logging.getLogger(__name__)
@@ -202,6 +204,14 @@ def check_import(
     return _report(kind, validated)
 
 
+class ImportInTransactionError(RuntimeError):
+    """取込の実行を、呼び出し側のトランザクションの中で呼んだときのエラー。
+
+    取込の実行は、自分でトランザクションを開始・コミット・ロールバックするため、外側の
+    トランザクションに参加させない（参加すると、失敗してもロールバックされない）。
+    """
+
+
 class _ValidationFailedError(Exception):
     """トランザクションの中の再検証でエラーが出たとき、ロールバックするための内部の例外。"""
 
@@ -235,20 +245,27 @@ def run_import(  # noqa: PLR0913 取込前のバックアップの作成先（MI
     """取込の実行（`MIG-050`）。エラーがなければ投入し、エラーがあれば何も変えない。
 
     `db_path` は `connection` の DB ファイル、`backup_dir` は取込前のバックアップの作成先
-    （`MIG-053`）。`today` は今日の日付で、再計算は今日の月までとする（`MIG-054`）。
-    バックアップを作れないときは、例外を送出し、取り込まない。投入・再計算・操作ログの
-    途中の例外は、ロールバックしてから再送出する（`MIG-052`）。
+    （`MIG-053`。なければ作る）。`today` は今日の日付で、再計算は今日の月までとする（`MIG-054`）。
+    検証を通ったら、`BEGIN IMMEDIATE` で書き込みのロックを取ってから、取込前のバックアップを
+    作る。バックアップを作れないときは、ロールバックして `BackupWriteError` を送出し、取り込まない
+    （作りかけのファイルは消す）。投入・再計算・操作ログの途中の例外は、ロールバックしてから
+    再送出する（`MIG-052`）。`connection` がトランザクションの中なら `ImportInTransactionError`。
     """
+    if connection.in_transaction:
+        raise ImportInTransactionError("取込の実行は、トランザクションの外で呼んでください")
     definition = _DEFINITIONS[kind]
     validated = definition.validate(connection, content, today)
     if validated.issues:
         _log_rejected(kind, validated)
         return _report(kind, validated)
 
-    backup_path = create_backup(db_path, backup_dir)
     _logger.info("取込を開始しました（種類=%s 行数=%d）", kind.value, validated.row_count)
+    backup_path: Path | None = None
     try:
         with transaction(connection):
+            # 書き込みのロックを取った後で、別の接続から読み取ってバックアップを作る。
+            # バックアップと投入の間に、ほかのタブの更新を入れないため。
+            backup_path = write_backup(db_path, backup_dir, create_directory=True)
             # 確認の結果は使わず、BEGIN IMMEDIATE の後で DB を読み直して検証する。
             validated = definition.validate(connection, content, today)
             if validated.issues:
@@ -266,6 +283,14 @@ def run_import(  # noqa: PLR0913 取込前のバックアップの作成先（MI
     except _ValidationFailedError as failure:
         _log_rejected(kind, failure.validated)
         return _report(kind, failure.validated, backup_path=backup_path)
+    except BackupWriteError as error:
+        # 例外の文言はパスを含みうるため、ログには種類だけを出す（MIG-056）。
+        _logger.error(
+            "取込前のバックアップを作れないため、取り込みませんでした（種類=%s 例外=%s）",
+            kind.value,
+            type(error).__name__,
+        )
+        raise
     except Exception as error:
         # 例外のメッセージは値を含みうるため、ログには種類だけを出す（MIG-056）。
         _logger.error(

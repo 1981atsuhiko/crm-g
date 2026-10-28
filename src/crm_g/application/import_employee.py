@@ -14,7 +14,7 @@
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 from crm_g.application.employee import EMPLOYMENT_TYPES, ENROLLMENT_STATUSES, GENDERS
 from crm_g.application.import_common import (
@@ -181,8 +181,10 @@ def _parse_row(row: ImportRow, today: date) -> tuple[EmployeeRecord | None, list
     employment_type = reader.read(
         EMPLOYMENT_TYPE_COLUMN, _choice(_EMPLOYMENT_TYPE_CHOICES, required=False)
     )
-    # 生年月日が未来の日付は、範囲の誤り（E009。ユーザー承認済み）。
-    birth_date = reader.read(BIRTH_DATE_COLUMN, _date(required=False, latest=today))
+    # 生年月日が今日以降は、範囲の誤り（E009）。画面（SCN-022「今日より前」）に合わせる。
+    birth_date = reader.read(
+        BIRTH_DATE_COLUMN, _date(required=False, latest=today - timedelta(days=1))
+    )
     gender = reader.read(GENDER_COLUMN, _choice(_GENDER_CHOICES, required=False))
     join_date = reader.read(JOIN_DATE_COLUMN, _date(required=True))
     nearest_station = reader.read(NEAREST_STATION_COLUMN, _free_text)
@@ -255,11 +257,27 @@ def _duplicate_issues(
     return issues
 
 
+def _normalized_keys(values: Iterable[object]) -> frozenset[str]:
+    """DB の値を、CSV のセルと同じ正規化（NFKC と前後の空白の除去）にそろえる。空は除く。"""
+    keys: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        key = normalize_cell(str(value))
+        if key is not None:
+            keys.add(key)
+    return frozenset(keys)
+
+
 def _existing_keys(connection: sqlite3.Connection) -> tuple[frozenset[str], frozenset[str]]:
-    """DB の全社員（退職者を含む）の、メールアドレス（小文字）と社員番号を返す。"""
+    """DB の全社員（退職者を含む）の、メールアドレスと社員番号を返す。
+
+    画面は社員番号を正規化せずに、メールアドレスを前後の空白の除去と小文字化だけで保存する
+    ため、DB の値にも CSV と同じ正規化（メールアドレスはさらに小文字化）をかけて比べる（`E013`）。
+    """
     rows = connection.execute("SELECT email, employee_no FROM employee").fetchall()
-    emails = frozenset(str(row[0]).lower() for row in rows)
-    employee_numbers = frozenset(str(row[1]) for row in rows if row[1] is not None)
+    emails = frozenset(key.lower() for key in _normalized_keys(row[0] for row in rows))
+    employee_numbers = _normalized_keys(row[1] for row in rows)
     return emails, employee_numbers
 
 

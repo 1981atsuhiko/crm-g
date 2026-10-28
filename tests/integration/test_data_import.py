@@ -16,6 +16,7 @@ import pytest
 from crm_g.application import data_import
 from crm_g.application.data_import import (
     ERROR_DISPLAY_LIMIT,
+    ImportInTransactionError,
     ImportKind,
     ImportKindDefinition,
     InsertOutcome,
@@ -30,7 +31,7 @@ from crm_g.application.operation_log import (
     OperationLogDetail,
     record_operation_log,
 )
-from crm_g.infrastructure.backup import create_backup, restore_backup
+from crm_g.infrastructure.backup import BackupWriteError, restore_database, write_backup
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.migration import apply_migrations
 
@@ -326,6 +327,34 @@ def test_employee_no_existing_in_db_is_e013(connection: sqlite3.Connection) -> N
     assert _issues(report) == [(2, "社員番号", "E013")]
 
 
+def test_db_keys_are_normalized_like_csv_before_comparison(
+    connection: sqlite3.Connection,
+) -> None:
+    """画面で保存した、正規化していない DB の値（全角・後ろの空白・全角のメール）も `E013`。"""
+    _insert_employee(connection, "a@example.com", "\uff25\uff10\uff10\uff10\uff11")
+    _insert_employee(connection, "b@example.com", "E0002 ")
+    _insert_employee(connection, "\uff43@example.com", None)
+    # 正規化すると空になる社員番号は、照合のキーにしない。
+    _insert_employee(connection, "d@example.com", "\u3000")
+
+    report = check_import(
+        connection,
+        _EMPLOYEE,
+        _csv(
+            "x@example.com,E0001,山田 太郎,,,,,2020/4/1,,,,在籍,",
+            "y@example.com,E0002,鈴木 花子,,,,,2020/4/1,,,,在籍,",
+            "C@example.com,,佐藤 次郎,,,,,2020/4/1,,,,在籍,",
+        ),
+        _TODAY,
+    )
+
+    assert _issues(report) == [
+        (2, "社員番号", "E013"),
+        (3, "社員番号", "E013"),
+        (4, "メールアドレス", "E013"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("line", "expected"),
     [
@@ -340,6 +369,7 @@ def test_employee_no_existing_in_db_is_e013(connection: sqlite3.Connection) -> N
         ("a@example.com,,山田 太郎,,,,,2020/4/1,,,,,", (2, "在籍ステータス", "E006")),
         ("a@example.com,,山田 太郎,,,,,2020/13/01,,,,在籍,", (2, "入社日", "E007")),
         ("a@example.com,,山田 太郎,,,2026/10/28,,2020/4/1,,,,在籍,", (2, "生年月日", "E009")),
+        ("a@example.com,,山田 太郎,,,2026/10/27,,2020/4/1,,,,在籍,", (2, "生年月日", "E009")),
         ("a@example.com,,山田 太郎,,,1990-02-30,,2020/4/1,,,,在籍,", (2, "生年月日", "E007")),
         ("a@example.com,,山田 太郎,,,,,2020/4/1,,,,退職,2020/3/31", (2, "退職日", "E016")),
         ("a@example.com,,山田 太郎,,,,,2020/4/1,,,,退職,2020/3/32", (2, "退職日", "E007")),
@@ -357,8 +387,11 @@ def test_row_validation_errors(
 
 
 def test_boundary_values_are_accepted(connection: sqlite3.Connection) -> None:
-    """生年月日が今日、退職日が入社日と同じ日は、エラーにしない。"""
-    line = "a@example.com,,山田 太郎,,,2026/10/27,その他,2020/4/1,,,,退職,2020/4/1"
+    """生年月日が今日の前日、退職日が入社日と同じ日は、エラーにしない。
+
+    生年月日が今日以降は `E009`（画面 `SCN-022` の「今日より前」に合わせる）。
+    """
+    line = "a@example.com,,山田 太郎,,,2026/10/26,その他,2020/4/1,,,,退職,2020/4/1"
 
     report = check_import(connection, _EMPLOYEE, _csv(line), _TODAY)
 
@@ -494,37 +527,107 @@ def test_tc_mig_040_exception_rolls_back_data_and_operation_log(
 
 
 def test_tc_mig_041_backup_failure_prevents_import(
-    connection: sqlite3.Connection, db_path: Path
+    connection: sqlite3.Connection,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured_log: pytest.LogCaptureFixture,
 ) -> None:
-    """取込前のバックアップを作れないときは、取り込まない（`MIG-053`）。"""
-    blocking_file = db_path.parent / "not-a-directory"
-    blocking_file.write_text("x", encoding="utf-8")
+    """取込前のバックアップを作れないときは、取り込まない（`MIG-053`）。
 
-    with pytest.raises(OSError):  # noqa: PT011 OS により例外の種類が変わるため
+    作りかけのファイルは残らない。ログには例外の種類だけが出て、文言にパスを含まない。
+    """
+    backup_dir = db_path.parent / "secret-backup-folder"
+
+    def fail_copy(source: Path, destination: Path) -> None:
+        # 作りかけのファイルができた後で、書き込みに失敗した状態にする。
+        destination.write_bytes(b"partial")
+        raise OSError(f"書き込めません: {destination}")
+
+    monkeypatch.setattr("crm_g.infrastructure.backup._copy_database", fail_copy)
+
+    with pytest.raises(BackupWriteError) as raised:
         run_import(
             connection,
             _EMPLOYEE,
             _csv(_TARO),
             _TODAY,
             db_path=db_path,
-            backup_dir=blocking_file,
+            backup_dir=backup_dir,
         )
 
+    assert "secret-backup-folder" not in str(raised.value)
+    assert list(backup_dir.iterdir()) == []
+    assert not connection.in_transaction
     assert _employees(connection) == []
     assert _operation_logs(connection) == []
+    error_messages = [
+        record.getMessage() for record in captured_log.records if record.levelno == logging.ERROR
+    ]
+    assert any("例外=BackupWriteError" in message for message in error_messages)
+    assert "secret-backup-folder" not in captured_log.text
+    assert "taro" not in captured_log.text.lower()
+
+
+def test_backup_is_made_while_holding_the_write_lock(
+    connection: sqlite3.Connection, db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取込前のバックアップは、`BEGIN IMMEDIATE` の後（ほかの接続が書き込めない間）に作る。"""
+    lock_states: list[bool] = []
+
+    def backup_under_lock(db_file: Path, directory: Path, *, create_directory: bool) -> Path:
+        other = sqlite3.connect(db_file, timeout=0)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            lock_states.append(True)
+        else:  # pragma: no cover 失敗したときだけ通る
+            other.rollback()
+            lock_states.append(False)
+        finally:
+            other.close()
+        return write_backup(db_file, directory, create_directory=create_directory)
+
+    monkeypatch.setattr(data_import, "write_backup", backup_under_lock)
+
+    report = _run(connection, db_path, _csv(_TARO))
+
+    assert lock_states == [True]
+    assert report.executed is True
+    assert report.backup_path is not None
+    with open_connection(report.backup_path) as backup:
+        assert _employees(backup) == []
+
+
+def test_run_import_inside_transaction_is_rejected(
+    connection: sqlite3.Connection, db_path: Path
+) -> None:
+    """呼び出し側のトランザクションの中では、取込の実行を拒む（ロールバックできないため）。"""
+    connection.execute("BEGIN")
+    try:
+        with pytest.raises(ImportInTransactionError) as raised:
+            _run(connection, db_path, _csv(_TARO))
+    finally:
+        connection.rollback()
+
+    assert "taro" not in str(raised.value).lower()
+    assert _employees(connection) == []
+    assert not (db_path.parent / "backups").exists()
 
 
 def test_tc_mig_042_restore_from_backup_returns_to_state_before_import(
     db_path: Path,
 ) -> None:
-    """取り込みの後に、取込前のバックアップから復元すると、取り込み前の状態に戻る。"""
+    """取り込みの後に、取込前のバックアップから復元すると、取り込み前の状態に戻る。
+
+    復元は、画面（`SCN-065`）と同じ `restore_database` で行う。
+    """
     with open_connection(db_path) as connection:
         _insert_employee(connection, "before@example.com", None)
         report = _run(connection, db_path, _csv(_TARO, _HANAKO))
         assert len(_employees(connection)) == 3
     assert report.backup_path is not None
 
-    restore_backup(report.backup_path, db_path)
+    restore_database(report.backup_path, db_path)
 
     with open_connection(db_path) as connection:
         assert [row[0] for row in _employees(connection)] == ["before@example.com"]
@@ -538,13 +641,26 @@ def test_tc_mig_045_revalidation_in_transaction_reads_db_again(
     content = _csv(_TARO, _HANAKO)
     assert check_import(connection, _EMPLOYEE, content, _TODAY).issues == ()
 
-    def backup_then_change_db(db_file: Path, backup_dir: Path) -> Path:
-        path = create_backup(db_file, backup_dir)
-        # 実行の検証からトランザクションの開始までの間に、別の取り込みが入った状態にする。
-        _insert_employee(connection, "taro.yamada@example.com", None)
-        return path
+    original = data_import._DEFINITIONS[ImportKind.EMPLOYEE]
+    calls: list[int] = []
 
-    monkeypatch.setattr(data_import, "create_backup", backup_then_change_db)
+    def validate_then_change_db(
+        target: sqlite3.Connection, csv_content: bytes, today: date
+    ) -> ValidatedImport:
+        validated = original.validate(target, csv_content, today)
+        calls.append(1)
+        if len(calls) == 1:
+            # 実行の検証からトランザクションの開始までの間に、別の取り込みが入った状態にする。
+            _insert_employee(connection, "taro.yamada@example.com", None)
+        return validated
+
+    monkeypatch.setitem(
+        data_import._DEFINITIONS,
+        ImportKind.EMPLOYEE,
+        ImportKindDefinition(
+            label="社員", target_table="employee", validate=validate_then_change_db
+        ),
+    )
 
     report = _run(connection, db_path, content)
 
