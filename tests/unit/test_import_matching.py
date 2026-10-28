@@ -1,4 +1,8 @@
-"""データ取込の名寄せの試験（移行設計書 4章、TC-MIG-012〜016）。値はすべて架空である。"""
+"""データ取込の名寄せの試験（移行設計書 4章、TC-MIG-012〜016）。値はすべて架空である。
+
+`TC-MIG-014`〜`TC-MIG-016` は、テスト計画書では IT である。ここでは、そのうちの名寄せの部分を
+UT として確かめる（関数名の `_matching_part`）。CSV の取込を通した IT は、PH-15-3 で行う。
+"""
 
 import pytest
 
@@ -41,8 +45,11 @@ def test_tc_mig_013_half_width_kana_and_full_width_alphabet_match() -> None:
     assert match_employee(_DIRECTORY, 3, "ＪＯＨＮ ＳＭＩＴＨ", None).employee_id == 3
 
 
-def test_tc_mig_014_variant_kanji_is_e010() -> None:
-    """異体字の氏名は一致せず、E010。照合に使った氏名を持つ。"""
+def test_tc_mig_014_matching_part_variant_kanji_is_e010() -> None:
+    """異体字の氏名は一致せず、E010。照合に使った氏名を持つ。
+
+    `TC-MIG-014` の名寄せの部分（UT）。取込の IT は PH-15-3 で行う。
+    """
     match = match_employee(_DIRECTORY, 2, "髙橋 次郎", "")
 
     assert match == EmployeeMatch(
@@ -50,16 +57,22 @@ def test_tc_mig_014_variant_kanji_is_e010() -> None:
     )
 
 
-def test_tc_mig_015_same_name_is_e011() -> None:
-    """同姓同名の社員が2人いて、氏名だけの行は E011。"""
+def test_tc_mig_015_matching_part_same_name_is_e011() -> None:
+    """同姓同名の社員が2人いて、氏名だけの行は E011。
+
+    `TC-MIG-015` の名寄せの部分（UT）。取込の IT は PH-15-3 で行う。
+    """
     match = match_employee(_DIRECTORY, 5, "佐藤 一郎", None)
 
     assert match.employee_id is None
     assert match.issue == ImportIssue(5, NAME_COLUMN, ImportErrorCode.EMPLOYEE_AMBIGUOUS)
 
 
-def test_tc_mig_016_email_takes_priority_over_name() -> None:
-    """メールアドレスの値がある行は、メールアドレスで特定する（大文字小文字・前後の空白を問わない）。"""
+def test_tc_mig_016_matching_part_email_takes_priority_over_name() -> None:
+    """メールアドレスの値がある行は、メールアドレスで特定する（大文字小文字・前後の空白を問わない）。
+
+    `TC-MIG-016` の名寄せの部分（UT）。取込の IT は PH-15-3 で行う。
+    """
     match = match_employee(_DIRECTORY, 2, "佐藤 一郎", " ICHIRO.B@example.com ")
 
     assert match.employee_id == 5
@@ -87,6 +100,34 @@ def test_both_empty_is_e006() -> None:
     assert match_employee(_DIRECTORY, 3, None, "").issue == ImportIssue(
         3, EMAIL_COLUMN, ImportErrorCode.REQUIRED_EMPTY
     )
+
+
+@pytest.mark.parametrize(
+    ("name_cell", "email_cell", "column"),
+    [
+        ("\u200b", "\u200b", NAME_COLUMN),
+        ("\u3000\u200b\u2060", None, NAME_COLUMN),
+        (None, "\u200b ", EMAIL_COLUMN),
+        ("\u200b", "", NAME_COLUMN),
+    ],
+)
+def test_format_characters_only_is_treated_as_empty(
+    name_cell: str | None, email_cell: str | None, column: str
+) -> None:
+    """書式文字（ゼロ幅スペースなど）と空白だけの氏名・メールアドレスは空とし、両方空なら E006。"""
+    match = match_employee(_DIRECTORY, 2, name_cell, email_cell)
+
+    assert match == EmployeeMatch(
+        2, None, ImportIssue(2, column, ImportErrorCode.REQUIRED_EMPTY), None, None
+    )
+
+
+def test_format_characters_only_email_falls_back_to_name() -> None:
+    """書式文字だけのメールアドレスは空として扱い、氏名で照合する。"""
+    match = match_employee(_DIRECTORY, 2, "山田 太郎", "\u200b")
+
+    assert match.employee_id == 1
+    assert match.email is None
 
 
 def test_unmatched_people_groups_by_name_and_reason() -> None:

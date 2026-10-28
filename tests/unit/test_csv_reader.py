@@ -55,6 +55,28 @@ def test_line_numbers_count_blank_lines_and_records() -> None:
     )
 
 
+def test_reads_cr_only_newlines() -> None:
+    """改行が CR だけの CSV も読める。"""
+    content = "氏名,年月\r山田 太郎,2026/04\r".encode()
+
+    assert read_csv(content) == (
+        CsvRecord(1, ("氏名", "年月")),
+        CsvRecord(2, ("山田 太郎", "2026/04")),
+    )
+
+
+def test_cell_larger_than_128kib_is_malformed() -> None:
+    """128KiB（131,072 文字）を超えるセルは、MALFORMED になる。メッセージに値を含まない。"""
+    content = ("a\r\n" + "x" * (128 * 1024 + 1) + "\r\n").encode()
+
+    with pytest.raises(CsvReadError) as raised:
+        read_csv(content)
+
+    assert raised.value.failure is CsvReadFailure.MALFORMED
+    assert raised.value.__cause__ is None
+    assert "xxx" not in str(raised.value)
+
+
 def test_empty_content_returns_no_records() -> None:
     """空のファイル（BOM だけを含む）は、レコードなし。"""
     assert read_csv(b"") == ()

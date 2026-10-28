@@ -122,6 +122,57 @@ def test_broken_csv_is_e002() -> None:
         assert result.issues == (ImportIssue(None, None, ImportErrorCode.NO_HEADER),)
 
 
+def test_cr_only_newlines_are_read() -> None:
+    """改行が CR だけの CSV も読める。"""
+    result = read_import_csv(_csv("氏名,年月,売上", "山田 太郎,2026/04,1", newline="\r"), _LAYOUT)
+
+    assert result.issues == ()
+    assert result.rows == (ImportRow(2, {"氏名": "山田 太郎", "年月": "2026/04", "売上": "1"}),)
+
+
+def test_cell_larger_than_128kib_is_e002() -> None:
+    """128KiB を超えるセルがあるときは、CSV として読めず、ファイル全体の E002。"""
+    content = _csv("氏名,年月,売上", "x" * (128 * 1024 + 1) + ",2026/04,1")
+
+    result = read_import_csv(content, _LAYOUT)
+
+    assert result.issues == (ImportIssue(None, None, ImportErrorCode.NO_HEADER),)
+    assert result.rows == ()
+
+
+def test_csv_without_header_row_is_e002_without_values() -> None:
+    """見出し行のない CSV（1行目がデータ）は、ファイル全体の E002。データの値をエラーに出さない。"""
+    content = _csv("山田 太郎,2026/04,700000", "山田 太郎,2026/04,700000")
+
+    result = read_import_csv(content, _LAYOUT)
+
+    assert result.issues == (ImportIssue(None, None, ImportErrorCode.NO_HEADER),)
+    assert result.rows == ()
+    assert result.excluded_columns == ()
+    assert "山田" not in repr(result)
+    assert "700000" not in repr(result)
+
+
+def test_header_with_no_matching_column_is_only_e002() -> None:
+    """1列も一致しないときは、重複（E005）・定義にない列（E004）の列名を出さず、E002 だけにする。"""
+    header = match_headers(["山田 太郎", "山田 太郎", "700000"], _LAYOUT)
+
+    assert header.issues == (ImportIssue(None, None, ImportErrorCode.NO_HEADER),)
+    assert header.positions == {}
+
+
+def test_header_with_only_excluded_column_is_not_e002() -> None:
+    """除外列だけが一致したときは、見出し行とみなす（必須の列がなければ E003）。"""
+    header = match_headers(["パスワード", "単価"], _LAYOUT)
+
+    assert header.issues == (
+        ImportIssue(1, "単価", ImportErrorCode.UNKNOWN_COLUMN),
+        ImportIssue(1, "年月", ImportErrorCode.MISSING_COLUMN),
+        ImportIssue(1, "売上", ImportErrorCode.MISSING_COLUMN),
+        ImportIssue(1, "氏名／メールアドレス", ImportErrorCode.MISSING_COLUMN),
+    )
+
+
 def test_blank_rows_are_skipped_but_counted_in_line_numbers() -> None:
     """空行は読み飛ばすが、行番号には数える。短い行は、足りないセルを空とする。"""
     content = _csv("氏名,年月,売上", "", " , ,\u3000", "山田 太郎,2026/04")
@@ -218,6 +269,40 @@ def test_headers_are_matched_after_nfkc_and_strip() -> None:
     assert header.issues == (ImportIssue(1, "memo", ImportErrorCode.UNKNOWN_COLUMN),)
     assert header.excluded_columns == ()
     assert header.excluded_positions == frozenset()
+
+
+@pytest.mark.parametrize("header", ["氏名\u200b", "\ufeff氏名", "\u200b 氏名\u2060 "])
+def test_headers_are_matched_after_removing_format_characters(header: str) -> None:
+    """見出しの書式文字（2つ目の BOM、ゼロ幅スペースなど）は、取り除いてから照合する。"""
+    result = read_import_csv(_csv(f"{header},年月,売上", "山田 太郎,2026/04,1", bom=True), _LAYOUT)
+
+    assert result.issues == ()
+    assert result.rows == (ImportRow(2, {"氏名": "山田 太郎", "年月": "2026/04", "売上": "1"}),)
+
+
+@pytest.mark.parametrize(
+    ("defined", "excluded"),
+    [
+        (("年月", "備考", "備考"), ()),
+        (("年月", "勤務手当（職務給）", "勤務手当(職務給)"), ()),
+        (("年月", "備考\u200b", " 備考"), ()),
+        (("年月", "支払額"), EXCLUDED_COLUMNS),
+        (("年月",), ("メモ", "ﾒﾓ")),
+    ],
+)
+def test_column_layout_rejects_duplicates_after_normalization(
+    defined: tuple[str, ...], excluded: tuple[str, ...]
+) -> None:
+    """列の定義に、正規化すると同じになる列名があるときは ValueError。
+
+    除外列との重なりも含む。メッセージには、列名を含めない。
+    """
+    with pytest.raises(ValueError, match="同じになる列名") as raised:
+        ColumnLayout(defined=defined, excluded=excluded)
+
+    assert "備考" not in str(raised.value)
+    assert "支払額" not in str(raised.value)
+    assert "メモ" not in str(raised.value)
 
 
 def test_excluded_columns_can_be_overridden() -> None:
@@ -342,6 +427,10 @@ def test_parse_year_month_rejects_invalid_as_e007(text: str) -> None:
         ("19期上期", "2025-H1"),
         ("20期下期", "2026-H2"),
         ("2026-H2", "2026-H2"),
+        ("1000-H1", "1000-H1"),
+        ("9999-H2", "9999-H2"),
+        ("1期上期", "2007-H1"),
+        ("999期下期", "3005-H2"),
     ],
 )
 def test_tc_mig_009_parse_half_accepts_formats(text: str, expected: str) -> None:
@@ -349,9 +438,25 @@ def test_tc_mig_009_parse_half_accepts_formats(text: str, expected: str) -> None
     assert parse_half(text) == expected
 
 
-@pytest.mark.parametrize("text", ["19期中期", "2025-H3", "2025-h1", "0000-H1", "19期", "上期"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "19期中期",
+        "2025-H3",
+        "2025-h1",
+        "0000-H1",
+        "0001-H1",
+        "0999-H2",
+        "12025-H1",
+        "0期上期",
+        "000期下期",
+        "1000期上期",
+        "19期",
+        "上期",
+    ],
+)
 def test_tc_mig_009_parse_half_rejects_invalid_as_e007(text: str) -> None:
-    """その他の形式は E007。"""
+    """範囲外（`YYYY` が 1000 未満、`NN期` が 0 期・4 桁以上）・その他の形式は E007。"""
     with pytest.raises(InvalidCellError) as raised:
         parse_half(text)
     assert _code_of(raised) is ImportErrorCode.INVALID_FORMAT
@@ -381,11 +486,49 @@ def test_tc_mig_010_parse_amount_rejects_format_as_e007(text: str) -> None:
     assert _code_of(raised) is ImportErrorCode.INVALID_FORMAT
 
 
-@pytest.mark.parametrize("text", ["-1", "-1,000"])
+@pytest.mark.parametrize("text", ["-1", "-1,000", "\u22121000", "\uff0d1,000", "\u22121,000"])
 def test_tc_mig_010_parse_amount_negative_is_e009(text: str) -> None:
-    """負の値は E009（下限 0）。"""
+    """負の値（先頭のマイナス記号は `-`・U+2212・全角）は E009（下限 0）。"""
     with pytest.raises(InvalidCellError) as raised:
         parse_amount(text)
+    assert _code_of(raised) is ImportErrorCode.OUT_OF_RANGE
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [("999999999999999", 999_999_999_999_999), ("999,999,999,999,999", 999_999_999_999_999)],
+)
+def test_parse_amount_accepts_up_to_15_digits(text: str, expected: int) -> None:
+    """金額は、数字（桁区切りを除く）15 桁まで受け付ける。"""
+    assert parse_amount(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1000000000000000",
+        "0000000000000000",
+        "1,000,000,000,000,000",
+        "99999999999999999999",
+        "9" * 5000,
+        "-" + "9" * 5000,
+    ],
+)
+def test_parse_amount_over_15_digits_is_e009_without_exception(text: str) -> None:
+    """15 桁を超える金額は E009。
+
+    `int()` の桁数の上限（4300 桁）を超える値でも、例外で止まらない。
+    """
+    with pytest.raises(InvalidCellError) as raised:
+        parse_amount(text)
+    assert _code_of(raised) is ImportErrorCode.OUT_OF_RANGE
+
+
+def test_parse_amount_with_custom_maximum() -> None:
+    """上限は、列ごとに変えられる。上限を超える値は E009。"""
+    assert parse_amount("100", maximum=100) == 100
+    with pytest.raises(InvalidCellError) as raised:
+        parse_amount("101", maximum=100)
     assert _code_of(raised) is ImportErrorCode.OUT_OF_RANGE
 
 
@@ -415,6 +558,10 @@ def test_parse_amount_with_custom_minimum() -> None:
         ("0%", 0),
         ("0.1234", 1234),
         ("12.34%", 1234),
+        ("-0", 0),
+        ("\u22120%", 0),
+        ("001", 10000),
+        ("100.00%", 10000),
     ],
 )
 def test_tc_mig_011_parse_rate_accepts_values(text: str, expected: int) -> None:
@@ -423,16 +570,35 @@ def test_tc_mig_011_parse_rate_accepts_values(text: str, expected: int) -> None:
 
 
 @pytest.mark.parametrize(
-    "text", ["70", "70.001%", "1.00001", "100.01%", "1.0001", "0.12345", "101%"]
+    "text",
+    [
+        "70",
+        "70.001%",
+        "1.00001",
+        "100.01%",
+        "1.0001",
+        "0.12345",
+        "101%",
+        "0001",
+        "0100%",
+        "9" * 5000,
+        "0." + "1" * 5000,
+        "1" * 5000 + "." + "1" * 5000 + "%",
+        "-0.5",
+        "\u22120.5",
+        "\uff0d50%",
+        "-1",
+    ],
 )
 def test_tc_mig_011_parse_rate_out_of_range_is_e009(text: str) -> None:
-    """1 を超える値（`%` なしの 70 を含む）・桁数の超過は E009（丸めない）。"""
+    """1 を超える値（`%` なしの 70 を含む）・負数・桁数の超過（整数部 3 桁超、小数部が `%` 付き
+    2 桁・なし 4 桁超）は E009（丸めない）。巨大な桁数の値でも、例外で止まらない。"""
     with pytest.raises(InvalidCellError) as raised:
         parse_rate_bp(text)
     assert _code_of(raised) is ImportErrorCode.OUT_OF_RANGE
 
 
-@pytest.mark.parametrize("text", ["abc", ".7", "7.", "-0.5", "70 %", "%"])
+@pytest.mark.parametrize("text", ["abc", ".7", "7.", "--0.5", "+0.5", "70 %", "%"])
 def test_parse_rate_invalid_format_is_e007(text: str) -> None:
     """数値でない値は E007。"""
     with pytest.raises(InvalidCellError) as raised:

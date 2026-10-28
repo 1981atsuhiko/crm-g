@@ -89,10 +89,11 @@ def match_employee(
 
     `name_cell`・`email_cell` は、セルの文字列（正規化前）。CSV にその列がないときは `None`。
     メールアドレスに値があれば、それだけで照合する（氏名は使わない。`MGD-001`）。
-    両方とも空のときは `E006` にする。
+    両方とも空のときは `E006` にする。空白類と書式文字（ゼロ幅スペースなど）だけの値は、
+    正規化名（`MIG-030`）が空になるため、空として扱う。
     """
-    name = None if name_cell is None else normalize_free_text(name_cell)
-    email = None if email_cell is None else normalize_cell(email_cell)
+    name = _non_blank(None if name_cell is None else normalize_free_text(name_cell))
+    email = _non_blank(None if email_cell is None else normalize_cell(email_cell))
 
     if email is not None:
         column = EMAIL_COLUMN
@@ -113,6 +114,13 @@ def match_employee(
         return EmployeeMatch(line_number, ids[0], None, name, email)
     code = ImportErrorCode.EMPLOYEE_NOT_FOUND if not ids else ImportErrorCode.EMPLOYEE_AMBIGUOUS
     return EmployeeMatch(line_number, None, ImportIssue(line_number, column, code), name, email)
+
+
+def _non_blank(text: str | None) -> str | None:
+    """正規化名（空白類と書式文字を取り除いた値）が空なら `None`、そうでなければ元の値を返す。"""
+    if text is None or not normalized_name(text):
+        return None
+    return text
 
 
 @dataclass(frozen=True)
