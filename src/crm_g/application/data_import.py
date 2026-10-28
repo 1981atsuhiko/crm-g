@@ -26,9 +26,15 @@ from datetime import date
 from enum import StrEnum
 from pathlib import Path
 
+from crm_g.application.import_bonus import (
+    employees_by_pay_month,
+    insert_bonuses,
+    validate_bonus_csv,
+)
 from crm_g.application.import_common import ImportIssue
 from crm_g.application.import_employee import insert_employees, validate_employee_csv
 from crm_g.application.import_matching import EmployeeMatch, UnmatchedPerson, unmatched_people
+from crm_g.application.import_monthly_pl import insert_monthly_pl, validate_monthly_pl_csv
 from crm_g.application.import_rate_history import insert_rate_histories, validate_rate_history_csv
 from crm_g.application.import_salary_history import (
     insert_salary_histories,
@@ -53,6 +59,8 @@ class ImportKind(StrEnum):
     SALARY_HISTORY = "salary-history"
     WORK_PERIOD = "work-period"
     RATE_HISTORY = "rate-history"
+    MONTHLY_PL = "monthly-pl"
+    BONUS = "bonus"
 
     @property
     def label(self) -> str:
@@ -62,18 +70,27 @@ class ImportKind(StrEnum):
 
 @dataclass(frozen=True)
 class RecalculationRequest:
-    """取込の後に再計算する社員と、最も早い月（`MIG-054`）。今月までを計算する。"""
+    """取込の後に再計算する社員と、最も早い月（`MIG-054`）。今月までを計算する。
+
+    `until` を指定したときは、その月までとする（今月より後の月は、計算しない）。
+    """
 
     employee_ids: tuple[int, ...]
     since: date
+    until: date | None = None
 
 
 @dataclass(frozen=True)
 class InsertOutcome:
-    """投入の結果。`recalculation` が `None` の種類は、再計算しない。"""
+    """投入の結果。`recalculation` が `None` の種類は、再計算しない。
+
+    `recalculations` は、`recalculation` のほかに再計算する範囲（社員ごとに月が異なる種類。
+    賞与の支給月ごとなど）。
+    """
 
     imported_count: int
     recalculation: RecalculationRequest | None = None
+    recalculations: tuple[RecalculationRequest, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -255,6 +272,50 @@ def _validate_rate_history(
     )
 
 
+def _validate_monthly_pl(
+    connection: sqlite3.Connection, content: bytes, today: date
+) -> ValidatedImport:
+    """`IMP-05` 月次売上原価の検証。取り込んだ行は締め済みのため、再計算しない（`MIG-054`）。"""
+    del today  # 月次売上原価の検証は、今日の日付を使わない。
+    validation = validate_monthly_pl_csv(connection, content)
+
+    def insert(target: sqlite3.Connection) -> InsertOutcome:
+        return InsertOutcome(imported_count=insert_monthly_pl(target, validation.records))
+
+    return ValidatedImport(
+        row_count=validation.row_count,
+        excluded_columns=validation.excluded_columns,
+        issues=validation.issues,
+        insert=insert,
+        matches=validation.matches,
+    )
+
+
+def _validate_bonus(connection: sqlite3.Connection, content: bytes, today: date) -> ValidatedImport:
+    """`IMP-06` 賞与の検証。取込の後に、支給月の同じ社員の月を再計算する（`MIG-054`）。
+
+    支給月が今月より後なら、再計算しない（`_recalculate` が今月までに制限する）。
+    """
+    del today  # 賞与の検証は、今日の日付を使わない。
+    validation = validate_bonus_csv(connection, content)
+
+    def insert(target: sqlite3.Connection) -> InsertOutcome:
+        imported_count = insert_bonuses(target, validation.records)
+        requests = []
+        for pay_month, employee_ids in employees_by_pay_month(validation.records):
+            first_day = date.fromisoformat(f"{pay_month}-01")
+            requests.append(RecalculationRequest(employee_ids, first_day, until=first_day))
+        return InsertOutcome(imported_count=imported_count, recalculations=tuple(requests))
+
+    return ValidatedImport(
+        row_count=validation.row_count,
+        excluded_columns=validation.excluded_columns,
+        issues=validation.issues,
+        insert=insert,
+        matches=validation.matches,
+    )
+
+
 _DEFINITIONS: dict[ImportKind, ImportKindDefinition] = {
     ImportKind.EMPLOYEE: ImportKindDefinition(
         label="社員", target_table="employee", validate=_validate_employee
@@ -267,6 +328,12 @@ _DEFINITIONS: dict[ImportKind, ImportKindDefinition] = {
     ),
     ImportKind.RATE_HISTORY: ImportKindDefinition(
         label="単価履歴", target_table="rate_history", validate=_validate_rate_history
+    ),
+    ImportKind.MONTHLY_PL: ImportKindDefinition(
+        label="月次売上原価", target_table="monthly_pl", validate=_validate_monthly_pl
+    ),
+    ImportKind.BONUS: ImportKindDefinition(
+        label="賞与", target_table="bonus", validate=_validate_bonus
     ),
 }
 
@@ -358,7 +425,7 @@ def run_import(  # noqa: PLR0913 取込前のバックアップの作成先（MI
             if validated.issues:
                 raise _ValidationFailedError(validated)
             outcome = validated.insert(connection)
-            recalculation = _recalculate(connection, outcome.recalculation, today)
+            recalculation = _recalculate(connection, outcome, today)
             record_operation_log(
                 connection,
                 Operation.IMPORT,
@@ -395,12 +462,34 @@ def run_import(  # noqa: PLR0913 取込前のバックアップの作成先（MI
 
 
 def _recalculate(
-    connection: sqlite3.Connection, request: RecalculationRequest | None, today: date
+    connection: sqlite3.Connection, outcome: InsertOutcome, today: date
 ) -> RecalculationResult | None:
-    """取込の後の再計算（`MIG-054`）。対象がない種類は、何もせず `None` を返す。"""
-    if request is None or not request.employee_ids:
+    """取込の後の再計算（`MIG-054`）。対象がない種類は、何もせず `None` を返す。
+
+    範囲が複数あるときは、順に再計算し、結果を1つにまとめる。各範囲は、今月までとする。
+    """
+    requests = [
+        request
+        for request in (outcome.recalculation, *outcome.recalculations)
+        if request is not None and request.employee_ids
+    ]
+    if not requests:
         return None
-    return recalculate_range(connection, request.since, today, request.employee_ids)
+    results = [
+        recalculate_range(
+            connection,
+            request.since,
+            today if request.until is None else min(request.until, today),
+            request.employee_ids,
+        )
+        for request in requests
+    ]
+    return RecalculationResult(
+        year_months=tuple(month for result in results for month in result.year_months),
+        saved_count=sum(result.saved_count for result in results),
+        errors=tuple(error for result in results for error in result.errors),
+        closed_months=tuple(month for result in results for month in result.closed_months),
+    )
 
 
 def _log_rejected(kind: ImportKind, validated: ValidatedImport) -> None:
