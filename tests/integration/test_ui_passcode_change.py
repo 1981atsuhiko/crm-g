@@ -11,6 +11,7 @@ from crm_g.application.auth import InvalidPasscodeError, setup_passcode, verify_
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.migration import apply_migrations
 from crm_g.ui.components.messages import UNEXPECTED_ERROR_MESSAGE
+from crm_g.ui.session import AUTHENTICATED_KEY
 
 _VIEW_PATH = (
     Path(__file__).resolve().parents[2] / "src" / "crm_g" / "ui" / "views" / "passcode_change.py"
@@ -131,6 +132,7 @@ def test_non_email_new_passcode_is_rejected(db_path: Path) -> None:
     assert not app.exception
     assert _errors(app) == ["新しいパスコードは、メールアドレス形式の文字列にしてください"]
     assert _operation_counts(db_path) == {"パスコード設定": 1}
+    _assert_inputs_cleared(app)
 
 
 def test_locked_account_shows_generic_message(db_path: Path) -> None:
@@ -146,6 +148,7 @@ def test_locked_account_shows_generic_message(db_path: Path) -> None:
     assert not app.exception
     assert _errors(app) == ["現在、入力を受け付けていません。時間をおいてやり直してください"]
     assert _operation_counts(db_path) == {"パスコード設定": 1}
+    _assert_inputs_cleared(app)
 
 
 def test_unexpected_error_shows_generic_message(
@@ -173,3 +176,30 @@ def test_can_retry_after_an_error(db_path: Path) -> None:
     assert _errors(app) == []
     assert _operation_counts(db_path) == {"パスコード設定": 2, "認証成功": 1}
     _assert_inputs_cleared(app)
+
+
+def test_same_passcode_is_accepted(db_path: Path) -> None:
+    app = _submit(_new_app(), _PASSCODE, _PASSCODE, _PASSCODE)
+
+    assert not app.exception
+    assert any("パスコードを変更しました" in toast.value for toast in app.toast)
+
+
+def test_messages_do_not_contain_passcodes(db_path: Path) -> None:
+    app = _submit(_new_app(), "wrong@3sss.co.jp", _NEW_PASSCODE, _NEW_PASSCODE)
+    shown = [*_errors(app), *(toast.value for toast in app.toast)]
+
+    assert shown
+    assert all("3sss" not in message for message in shown)
+
+
+def test_locking_on_this_screen_does_not_log_out(db_path: Path) -> None:
+    app = _new_app()
+    app.session_state[AUTHENTICATED_KEY] = True
+    for _ in range(5):
+        app = _submit(app, "wrong@3sss.co.jp", _NEW_PASSCODE, _NEW_PASSCODE)
+
+    app = _submit(app, _PASSCODE, _NEW_PASSCODE, _NEW_PASSCODE)
+
+    assert _errors(app) == ["現在、入力を受け付けていません。時間をおいてやり直してください"]
+    assert app.session_state[AUTHENTICATED_KEY] is True

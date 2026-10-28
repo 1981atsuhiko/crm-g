@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from crm_g.application.auth import setup_passcode
+from crm_g.application.auth import change_passcode, setup_passcode
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.migration import apply_migrations
 from crm_g.ui.session import AUTHENTICATED_KEY, EXPORT_STATE_KEY
@@ -195,3 +195,38 @@ def test_authenticated_session_can_open_passcode_change(localappdata: Path) -> N
 
     assert _titles(app) == ["パスコード変更"]
     assert not app.exception
+
+
+def test_tc_fun_018_login_after_change_accepts_only_the_new_passcode(
+    localappdata: Path,
+) -> None:
+    db_path = localappdata / "crm-g" / "crm-g.db"
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+        change_passcode(connection, _PASSCODE, "jiro@3sss.co.jp", "jiro@3sss.co.jp")
+
+    app = AppTest.from_file(str(_APP_PATH), default_timeout=_APPTEST_TIMEOUT_SECONDS).run()
+    app.text_input(key="login_passcode").set_value(_PASSCODE)
+    app.button(key="login_submit").click()
+    app = app.run()
+    assert _titles(app) == ["ログイン"]
+    # 誤った入力の後も、入力値は残らない（UID-050）。
+    assert "login_passcode" not in app.session_state
+
+    app.text_input(key="login_passcode").set_value("jiro@3sss.co.jp")
+    app.button(key="login_submit").click()
+    app = app.run()
+
+    assert _titles(app) == ["ダッシュボード"]
+
+
+def test_setup_error_does_not_keep_inputs(localappdata: Path) -> None:
+    app = AppTest.from_file(str(_APP_PATH), default_timeout=_APPTEST_TIMEOUT_SECONDS).run()
+    app.text_input(key="setup_passcode").set_value("taro@3sss.co.jp")
+    app.text_input(key="setup_confirm").set_value("other@3sss.co.jp")
+    app.button(key="setup_submit").click()
+    app = app.run()
+
+    assert app.error
+    assert "setup_passcode" not in app.session_state
+    assert "setup_confirm" not in app.session_state

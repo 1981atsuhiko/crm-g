@@ -174,7 +174,7 @@ def test_change_passcode_requires_correct_current_passcode(db_path: Path) -> Non
 def test_change_passcode_leaves_credential_valid_when_new_passcode_is_invalid(
     db_path: Path,
 ) -> None:
-    """現在のパスコードの確認は成功しても、新パスコードの確認が不一致なら変更しない。"""
+    """新しいパスコードの確認が不一致なら、現在のパスコードを確認する前に止め、変更しない。"""
     with open_connection(db_path) as connection:
         setup_passcode(connection, _PASSCODE, _PASSCODE)
 
@@ -294,20 +294,26 @@ def test_write_failure_during_verification_rolls_back_credential_and_log(
 
 
 def test_lockout_duration_is_five_minutes(db_path: Path) -> None:
-    """ロックの有効期限が、おおよそ5分後に設定されることを確認する。"""
+    """ロックの有効期限が、5回目の失敗の時刻から5分後に設定されることを確認する。
+
+    scrypt の計算時間はマシンの負荷に依存するため、5回目の照合の直前と直後の時刻で挟んで確かめる。
+    """
     with open_connection(db_path) as connection:
         setup_passcode(connection, _PASSCODE, _PASSCODE)
-        before = utc_now()
-
-        for _ in range(5):
+        for _ in range(4):
             with pytest.raises(InvalidPasscodeError):
                 verify_passcode(connection, "wrong@3sss.co.jp")
+
+        before = utc_now()
+        with pytest.raises(InvalidPasscodeError):
+            verify_passcode(connection, "wrong@3sss.co.jp")
+        after = utc_now()
 
         locked_until = from_iso8601(
             connection.execute("SELECT locked_until FROM app_credential WHERE id = 1").fetchone()[0]
         )
-        delta = (locked_until - before).total_seconds()
-        assert 295 <= delta <= 305
+        lock_duration = timedelta(minutes=5)
+        assert before + lock_duration <= locked_until <= after + lock_duration
 
 
 def test_lockout_blocks_until_expiry_then_allows_again(db_path: Path) -> None:

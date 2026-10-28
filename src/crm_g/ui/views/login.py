@@ -21,12 +21,15 @@ from crm_g.ui.session import AUTHENTICATED_KEY
 def render() -> None:
     st.title("ログイン")
 
-    with st.form("login_form"):
+    with st.form("login_form", clear_on_submit=True):
         passcode = st.text_input("パスコード", type="password", key="login_passcode")
         submitted = st.form_submit_button("ログイン", key="login_submit")
 
     if not submitted:
         return
+    # 入力値を残さない（`UID-050`、`SCD-011`）。`clear_on_submit` はブラウザ側の消去のため、
+    # サーバーの `st.session_state` からも消す。
+    st.session_state.pop("login_passcode", None)
 
     db_path = get_app_paths().db_path
     try:
