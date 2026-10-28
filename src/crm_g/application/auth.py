@@ -68,16 +68,25 @@ def is_passcode_set(connection: sqlite3.Connection) -> bool:
     return row is not None
 
 
+def _validate_new_passcode(passcode: str, confirm: str) -> None:
+    """新しいパスコードの入力を検査する（確認用の入力との一致、メールアドレス形式）。
+
+    一致しないときは `PasscodeMismatchError`、形式が正しくないときは
+    `InvalidPasscodeFormatError` を送出する（`SCD-009`）。
+    """
+    if passcode != confirm:
+        raise PasscodeMismatchError("確認用の入力が一致しません")
+    if not is_valid_email_format(passcode):
+        raise InvalidPasscodeFormatError("パスコードは、メールアドレス形式の文字列にしてください")
+
+
 def setup_passcode(connection: sqlite3.Connection, passcode: str, confirm: str) -> None:
     """パスコードを設定する（初回設定・変更の共通処理）。
 
     確認用の入力と一致しないとき、メールアドレス形式でないときは、設定しない
     （`SCD-009`）。
     """
-    if passcode != confirm:
-        raise PasscodeMismatchError("確認用の入力が一致しません")
-    if not is_valid_email_format(passcode):
-        raise InvalidPasscodeFormatError("パスコードは、メールアドレス形式の文字列にしてください")
+    _validate_new_passcode(passcode, confirm)
 
     salt = secrets.token_bytes(_SALT_BYTES)
     digest = _hash_passcode(passcode, salt, _CURRENT_SCRYPT_N, _CURRENT_SCRYPT_R, _CURRENT_SCRYPT_P)
@@ -200,6 +209,13 @@ def verify_passcode(connection: sqlite3.Connection, passcode: str) -> None:
 def change_passcode(
     connection: sqlite3.Connection, current_passcode: str, new_passcode: str, confirm: str
 ) -> None:
-    """現在のパスコードを確認したうえで、新しいパスコードに変更する（`SCD-011`）。"""
+    """現在のパスコードを確認したうえで、新しいパスコードに変更する（`SCD-011`）。
+
+    新しいパスコードの入力（確認用との一致、形式）を、現在のパスコードの確認より
+    先に検査する。新しい入力の誤りで変更できないときに、現在のパスコードの確認
+    （`認証成功`・`認証失敗` の記録、失敗回数の更新）を行わないためである。
+    現在のパスコードが正しくないときは、`認証失敗` を記録して、変更しない（`SCD-008`）。
+    """
+    _validate_new_passcode(new_passcode, confirm)
     verify_passcode(connection, current_passcode)
     setup_passcode(connection, new_passcode, confirm)

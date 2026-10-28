@@ -1,7 +1,7 @@
 """パスコード設定画面（`SCN-001`、`SCD-009`）。
 
 パスコードが未設定のときだけ表示する（`app.py` の関門）。設定するまで、
-他の画面は表示しない。
+他の画面は表示しない。入力値は、送信のたびに消す（`UID-050`、`SCD-011`）。
 """
 
 import streamlit as st
@@ -20,13 +20,16 @@ from crm_g.ui.session import AUTHENTICATED_KEY
 def render() -> None:
     st.title("パスコード設定")
 
-    with st.form("setup_form"):
+    with st.form("setup_form", clear_on_submit=True):
         passcode = st.text_input("パスコード", type="password", key="setup_passcode")
         confirm = st.text_input("パスコード（確認）", type="password", key="setup_confirm")
         submitted = st.form_submit_button("設定", key="setup_submit")
 
     if not submitted:
         return
+    # `clear_on_submit` はブラウザ側の消去のため、サーバーの `st.session_state` からも消す。
+    for key in ("setup_passcode", "setup_confirm"):
+        st.session_state.pop(key, None)
 
     db_path = get_app_paths().db_path
     try:

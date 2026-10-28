@@ -174,7 +174,7 @@ def test_change_passcode_requires_correct_current_passcode(db_path: Path) -> Non
 def test_change_passcode_leaves_credential_valid_when_new_passcode_is_invalid(
     db_path: Path,
 ) -> None:
-    """現在のパスコードの確認は成功しても、新パスコードの確認が不一致なら変更しない。"""
+    """新しいパスコードの確認が不一致なら、現在のパスコードを確認する前に止め、変更しない。"""
     with open_connection(db_path) as connection:
         setup_passcode(connection, _PASSCODE, _PASSCODE)
 
@@ -183,6 +183,63 @@ def test_change_passcode_leaves_credential_valid_when_new_passcode_is_invalid(
 
         # 現在のパスコードのまま検証できる（変更されていない）。
         verify_passcode(connection, _PASSCODE)
+
+
+def _operation_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    """操作ログの操作ごとの件数を返す。"""
+    rows = connection.execute(
+        "SELECT operation, COUNT(*) FROM operation_log GROUP BY operation"
+    ).fetchall()
+    return {operation: count for operation, count in rows}
+
+
+def test_change_passcode_checks_new_passcode_before_verifying_current(db_path: Path) -> None:
+    """新しいパスコードの不一致は、現在のパスコードの確認より先に検査する。
+
+    現在のパスコードが誤っていても、新しい入力の誤りで止まり、`認証失敗` の記録も
+    失敗回数の加算も行わない。
+    """
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+        with pytest.raises(PasscodeMismatchError):
+            change_passcode(connection, "wrong@3sss.co.jp", "jiro@3sss.co.jp", "saburo@3sss.co.jp")
+
+        failed_count = connection.execute(
+            "SELECT failed_count FROM app_credential WHERE id = 1"
+        ).fetchone()[0]
+        assert failed_count == 0
+        assert _operation_counts(connection) == {"パスコード設定": 1}
+
+
+def test_change_passcode_with_invalid_new_format_does_not_record_auth_success(
+    db_path: Path,
+) -> None:
+    """新しいパスコードの形式の誤りでは、現在のパスコードを確認しない（`認証成功` を残さない）。"""
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+        with pytest.raises(InvalidPasscodeFormatError):
+            change_passcode(connection, _PASSCODE, "not-an-email", "not-an-email")
+
+        assert _operation_counts(connection) == {"パスコード設定": 1}
+        verify_passcode(connection, _PASSCODE)
+
+
+def test_change_passcode_with_wrong_current_records_auth_failure(db_path: Path) -> None:
+    """現在のパスコードが誤っているときは、`認証失敗` を記録し、失敗回数を加算する（`SCD-008`）。"""
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+        new_passcode = "jiro@3sss.co.jp"
+        with pytest.raises(InvalidPasscodeError):
+            change_passcode(connection, "wrong@3sss.co.jp", new_passcode, new_passcode)
+
+        failed_count = connection.execute(
+            "SELECT failed_count FROM app_credential WHERE id = 1"
+        ).fetchone()[0]
+        assert failed_count == 1
+        assert _operation_counts(connection) == {"パスコード設定": 1, "認証失敗": 1}
 
 
 def test_change_passcode_succeeds_and_logs_passcode_set(db_path: Path) -> None:
@@ -237,20 +294,26 @@ def test_write_failure_during_verification_rolls_back_credential_and_log(
 
 
 def test_lockout_duration_is_five_minutes(db_path: Path) -> None:
-    """ロックの有効期限が、おおよそ5分後に設定されることを確認する。"""
+    """ロックの有効期限が、5回目の失敗の時刻から5分後に設定されることを確認する。
+
+    scrypt の計算時間はマシンの負荷に依存するため、5回目の照合の直前と直後の時刻で挟んで確かめる。
+    """
     with open_connection(db_path) as connection:
         setup_passcode(connection, _PASSCODE, _PASSCODE)
-        before = utc_now()
-
-        for _ in range(5):
+        for _ in range(4):
             with pytest.raises(InvalidPasscodeError):
                 verify_passcode(connection, "wrong@3sss.co.jp")
+
+        before = utc_now()
+        with pytest.raises(InvalidPasscodeError):
+            verify_passcode(connection, "wrong@3sss.co.jp")
+        after = utc_now()
 
         locked_until = from_iso8601(
             connection.execute("SELECT locked_until FROM app_credential WHERE id = 1").fetchone()[0]
         )
-        delta = (locked_until - before).total_seconds()
-        assert 295 <= delta <= 305
+        lock_duration = timedelta(minutes=5)
+        assert before + lock_duration <= locked_until <= after + lock_duration
 
 
 def test_lockout_blocks_until_expiry_then_allows_again(db_path: Path) -> None:
