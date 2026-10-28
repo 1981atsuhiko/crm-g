@@ -34,6 +34,7 @@ from crm_g.application.import_rows import (
     RowReader,
     code_text,
     free_text,
+    key_issues,
     match_rows,
     optional_amount,
     required_choice,
@@ -228,22 +229,13 @@ def _parse_row(
 
 def _duplicate_issues(parsed_rows: Sequence[_ParsedRow]) -> list[ImportIssue]:
     """同じ社員・同じ適用開始日の行を、2回目以降の行で `E012` にする（ファイル内の検証）。"""
-    issues: list[ImportIssue] = []
-    seen: set[tuple[int, date]] = set()
-    for parsed in parsed_rows:
-        if parsed.employee_id is None or parsed.effective_from is None:
-            continue
-        key = (parsed.employee_id, parsed.effective_from)
-        if key in seen:
-            issues.append(
-                ImportIssue(
-                    parsed.line_number,
-                    EFFECTIVE_FROM_COLUMN,
-                    ImportErrorCode.DUPLICATE_KEY_IN_FILE,
-                )
-            )
-        seen.add(key)
-    return issues
+    keys = [
+        (parsed.line_number, (parsed.employee_id, parsed.effective_from))
+        for parsed in parsed_rows
+        if parsed.employee_id is not None and parsed.effective_from is not None
+    ]
+    # DB との照合は、最新の履歴との比較で別に行う（ここでは、ファイル内の重複だけを見る）。
+    return key_issues(keys, EFFECTIVE_FROM_COLUMN, lambda _key: None)
 
 
 def _latest_histories(

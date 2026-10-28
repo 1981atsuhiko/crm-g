@@ -26,16 +26,17 @@ from crm_g.application.import_common import (
     ImportIssue,
     ImportRow,
     read_import_csv,
-    require_value,
 )
 from crm_g.application.import_matching import EMAIL_COLUMN, NAME_COLUMN, EmployeeMatch
 from crm_g.application.import_rows import (
     EMPLOYEE_KEY_REQUIRED_ONE_OF,
     RowReader,
     free_text,
+    key_issues,
     match_rows,
     required_amount,
     required_date,
+    required_free_text,
     sorted_issues,
 )
 from crm_g.domain.name_normalization import normalized_name
@@ -170,7 +171,7 @@ def _parse_row(
         reader.issues.append(match.issue)
     effective_from = reader.read(EFFECTIVE_FROM_COLUMN, required_date)
     unit_price = reader.read(UNIT_PRICE_COLUMN, required_amount)
-    customer_name = reader.read(CUSTOMER_NAME_COLUMN, _required_free_text)
+    customer_name = reader.read(CUSTOMER_NAME_COLUMN, required_free_text)
     project_name = reader.read(PROJECT_NAME_COLUMN, free_text)
     if customer_name is None and project_name is not None:
         reader.add(PROJECT_NAME_COLUMN, ImportErrorCode.INVALID_COMBINATION)
@@ -216,11 +217,6 @@ def _parse_row(
     return parsed, reader.issues
 
 
-def _required_free_text(raw: str | None) -> str:
-    """必須の自由記述のセル。空は `E006`。"""
-    return require_value(free_text(raw))
-
-
 def _within(day: date, assignment: _Assignment) -> bool:
     """日付が、参画の開始日〜終了日（空は継続中）の中にあるか（データ設計書 10章 No.12）。"""
     return assignment.start_date <= day and (
@@ -232,25 +228,21 @@ def _duplicate_issues(
     connection: sqlite3.Connection, parsed_rows: Sequence[_ParsedRow]
 ) -> list[ImportIssue]:
     """（参画、適用開始日）の重複を検査する。DB にあれば `E013`、CSV の2回目以降は `E012`。"""
-    issues: list[ImportIssue] = []
-    seen: set[tuple[int, date]] = set()
-    for parsed in parsed_rows:
-        if parsed.assignment_id is None or parsed.effective_from is None:
-            continue
-        key = (parsed.assignment_id, parsed.effective_from)
+    keys = [
+        (parsed.line_number, (parsed.assignment_id, parsed.effective_from))
+        for parsed in parsed_rows
+        if parsed.assignment_id is not None and parsed.effective_from is not None
+    ]
+
+    def db_issue(key: tuple[int, date]) -> ImportErrorCode | None:
+        assignment_id, effective_from = key
         exists = connection.execute(
             "SELECT 1 FROM rate_history WHERE assignment_id = ? AND effective_from = ?",
-            (parsed.assignment_id, parsed.effective_from.isoformat()),
+            (assignment_id, effective_from.isoformat()),
         ).fetchone()
-        if exists is not None:
-            code = ImportErrorCode.DUPLICATE_KEY_IN_DB
-        elif key in seen:
-            code = ImportErrorCode.DUPLICATE_KEY_IN_FILE
-        else:
-            seen.add(key)
-            continue
-        issues.append(ImportIssue(parsed.line_number, EFFECTIVE_FROM_COLUMN, code))
-    return issues
+        return None if exists is None else ImportErrorCode.DUPLICATE_KEY_IN_DB
+
+    return key_issues(keys, EFFECTIVE_FROM_COLUMN, db_issue)
 
 
 def validate_rate_history_csv(

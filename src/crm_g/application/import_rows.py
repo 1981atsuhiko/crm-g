@@ -78,6 +78,11 @@ def free_text(raw: str | None) -> str | None:
     return None if raw is None else normalize_free_text(raw)
 
 
+def required_free_text(raw: str | None) -> str:
+    """必須の自由記述のセル。空は `E006`。"""
+    return require_value(free_text(raw))
+
+
 def optional_date(raw: str | None) -> date | None:
     """任意の日付のセル（`MIG-023`）。空は `None`、形式の誤りは `E007`。"""
     text = code_text(raw)
