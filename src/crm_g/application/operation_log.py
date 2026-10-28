@@ -1,4 +1,4 @@
-"""操作ログの書き込み（SCD-020〜024）。
+"""操作ログの書き込み（SCD-020〜024）と、操作ログ画面（`SCN-067`）の照会。
 
 呼び出し側は、業務データの変更と同じトランザクション内でこの関数を呼ぶ
 （`transaction()` の中で呼ぶこと。関数自体はトランザクションを開始しない）。
@@ -8,12 +8,16 @@
 
 import json
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from enum import StrEnum
 from typing import Any
 
-from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
+from crm_g.infrastructure.datetime_utils import JST, from_iso8601, to_iso8601, utc_now
+
+# 操作ログ画面の1回の表示の上限（設計判断 `UID-080`）。
+OPERATION_LOG_DISPLAY_LIMIT = 1000
 
 
 class Operation(StrEnum):
@@ -79,4 +83,96 @@ def record_operation_log(
             if detail.after_value is not None
             else None,
         ),
+    )
+
+
+@dataclass(frozen=True)
+class OperationLogRow:
+    """操作ログ画面の一覧の1行（`SCN-067`）。
+
+    `occurred_at` は、タイムゾーン付き（UTC）の datetime。変更前・変更後は、
+    保存されている JSON の文字列のまま持つ（`SCD-022`）。
+    """
+
+    occurred_at: datetime
+    operation: str
+    target_table: str
+    target_key: str | None
+    detail: str | None
+    before_value: str | None
+    after_value: str | None
+
+
+@dataclass(frozen=True)
+class OperationLogSearchResult:
+    """操作ログの照会の結果（`SCN-067`）。
+
+    `rows` は新しい順で、最大 `OPERATION_LOG_DISPLAY_LIMIT` 件。`exceeds_limit` は、
+    該当が上限を超えたとき `True`（画面は「絞り込んでください」と表示する。`UID-080`）。
+    """
+
+    rows: tuple[OperationLogRow, ...]
+    exceeds_limit: bool
+
+
+def jst_date_range_to_utc(start_date: date, end_date: date) -> tuple[str, str]:
+    """日本時間の日付の範囲を、UTC の半開区間 [開始, 終了) の ISO 8601 文字列にする。
+
+    開始は開始日の 0時（日本時間）、終了は終了日の翌日の 0時（日本時間）。
+    `occurred_at` と同じ形式（UTC、末尾 Z、マイクロ秒6桁）のため、文字列の比較が
+    時系列の比較と一致する（`to_iso8601`）。
+    """
+    range_start = datetime.combine(start_date, time.min, tzinfo=JST)
+    range_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=JST)
+    return to_iso8601(range_start), to_iso8601(range_end)
+
+
+def search_operation_logs(
+    connection: sqlite3.Connection,
+    start_date: date,
+    end_date: date,
+    operations: Sequence[Operation],
+) -> OperationLogSearchResult:
+    """期間（日本時間の日付）と操作の種類で、操作ログを新しい順に照会する（`SCN-067`）。
+
+    上限を超えたかを判定するため、上限より1件多く読む（`UID-080`）。操作の種類を
+    1つも選ばないときは、該当なしとする。開始日が終了日より後のときは `ValueError`。
+    照会しても `閲覧` は記録しない（`UID-060`。ユーザー承認 2026-10-27）。
+    """
+    if start_date > end_date:
+        raise ValueError("開始日は、終了日以前の日付にしてください。")
+    if not operations:
+        return OperationLogSearchResult(rows=(), exceeds_limit=False)
+
+    range_start, range_end = jst_date_range_to_utc(start_date, end_date)
+    # placeholders は "?" だけで構成される（利用者の入力は含まない）。値は、
+    # params を通じてプレースホルダに束縛するため、SQLインジェクションの
+    # リスクはない。
+    placeholders = ", ".join("?" for _ in operations)
+    query = (
+        "SELECT occurred_at, operation, target_table, target_key, detail, "
+        "before_value, after_value FROM operation_log "
+        "WHERE occurred_at >= ? AND occurred_at < ?"
+    )
+    query += " AND operation IN (" + placeholders + ")"
+    query += " ORDER BY occurred_at DESC, id DESC LIMIT ?"
+    params: list[object] = [range_start, range_end]
+    params.extend(operation.value for operation in operations)
+    params.append(OPERATION_LOG_DISPLAY_LIMIT + 1)
+
+    fetched = connection.execute(query, params).fetchall()
+    rows = tuple(
+        OperationLogRow(
+            occurred_at=from_iso8601(row[0]),
+            operation=row[1],
+            target_table=row[2],
+            target_key=row[3],
+            detail=row[4],
+            before_value=row[5],
+            after_value=row[6],
+        )
+        for row in fetched[:OPERATION_LOG_DISPLAY_LIMIT]
+    )
+    return OperationLogSearchResult(
+        rows=rows, exceeds_limit=len(fetched) > OPERATION_LOG_DISPLAY_LIMIT
     )
