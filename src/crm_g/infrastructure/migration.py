@@ -47,6 +47,14 @@ class InvalidDatabaseFileError(RuntimeError):
     """検査したファイルが、このアプリのDB（`schema_migration` を持つ SQLite）でないときのエラー。"""
 
 
+class DatabaseNotFoundError(RuntimeError):
+    """DBファイルがないときのエラー（アプリを一度も起動していない）。"""
+
+
+class PendingMigrationError(RuntimeError):
+    """DBに、未適用の連番SQLがあるときのエラー（アプリを起動して適用する）。"""
+
+
 class MigrationFailedError(RuntimeError):
     """連番SQLの適用に失敗したときのエラー。`backup_path` から復元できる。"""
 
@@ -143,17 +151,12 @@ def _verify_applied(files: Sequence[MigrationFile], applied: dict[int, tuple[str
     _verify_checksums(files, applied)
 
 
-def verify_database_file(db_path: Path, ddl_dir: Path) -> None:
-    """DBファイルのスキーマの版を、同梱のDDLと照らして検査する（書き換えない）。
+def _read_applied_read_only(db_path: Path) -> dict[int, tuple[str, str]]:
+    """DBファイルを読み取り専用で開き、適用済みの版を読む（書き換えない）。
 
-    バックアップからの復元の前の検査に使う（画面設計書 `SCN-065`）。次のとき
-    エラーにする。SQLite のファイルでない・`schema_migration` がない・版が1つも
-    記録されていない（`InvalidDatabaseFileError`）。同梱のDDLにない版がある
-    （`UnknownMigrationError`。アプリより新しい版・未知の版）。適用済みの版の
-    チェックサムが合わない（`ChecksumMismatchError`）。同梱のDDLより古い版は、
-    エラーにしない（復元の後に、未適用の連番SQLを適用する）。
+    SQLite のファイルでない・`schema_migration` がない・版が1つも記録されていないときは、
+    `InvalidDatabaseFileError` にする。
     """
-    files = _list_migration_files(ddl_dir)
     try:
         connection = open_read_only(db_path)
     except sqlite3.Error as error:
@@ -171,7 +174,40 @@ def verify_database_file(db_path: Path, ddl_dir: Path) -> None:
 
     if not applied:
         raise InvalidDatabaseFileError("このアプリのDBファイルではありません")
+    return applied
+
+
+def verify_database_file(db_path: Path, ddl_dir: Path) -> None:
+    """DBファイルのスキーマの版を、同梱のDDLと照らして検査する（書き換えない）。
+
+    バックアップからの復元の前の検査に使う（画面設計書 `SCN-065`）。次のとき
+    エラーにする。SQLite のファイルでない・`schema_migration` がない・版が1つも
+    記録されていない（`InvalidDatabaseFileError`）。同梱のDDLにない版がある
+    （`UnknownMigrationError`。アプリより新しい版・未知の版）。適用済みの版の
+    チェックサムが合わない（`ChecksumMismatchError`）。同梱のDDLより古い版は、
+    エラーにしない（復元の後に、未適用の連番SQLを適用する）。
+    """
+    files = _list_migration_files(ddl_dir)
+    applied = _read_applied_read_only(db_path)
     _verify_applied(files, applied)
+
+
+def verify_schema_is_current(db_path: Path, ddl_dir: Path) -> None:
+    """DBのスキーマが、同梱のDDLの最新の版であることを確かめる（DBを作らず、書き換えない）。
+
+    移行コマンド（移行設計書 `MIG-070`）の前の検査に使う。移行コマンドは、マイグレーションを
+    適用しない（アプリの起動時に適用する。ユーザー承認 2026-10-27）。`verify_database_file` の
+    エラーに加えて、DBファイルがないとき（`DatabaseNotFoundError`）と、未適用の連番SQLが
+    あるとき（`PendingMigrationError`）をエラーにする。
+    """
+    if not db_path.is_file():
+        raise DatabaseNotFoundError("DBファイルがありません")
+    files = _list_migration_files(ddl_dir)
+    applied = _read_applied_read_only(db_path)
+    _verify_applied(files, applied)
+    pending = [file.name for file in files if file.version not in applied]
+    if pending:
+        raise PendingMigrationError(f"未適用の連番SQLがあります: {pending}")
 
 
 def apply_migrations(

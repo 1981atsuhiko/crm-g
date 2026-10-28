@@ -12,13 +12,16 @@ import pytest
 from crm_g.infrastructure.backup import restore_backup
 from crm_g.infrastructure.migration import (
     ChecksumMismatchError,
+    DatabaseNotFoundError,
     DuplicateMigrationVersionError,
     InvalidDatabaseFileError,
     InvalidMigrationFilenameError,
     MigrationFailedError,
+    PendingMigrationError,
     UnknownMigrationError,
     apply_migrations,
     verify_database_file,
+    verify_schema_is_current,
 )
 
 
@@ -295,3 +298,55 @@ def test_verify_database_file_rejects_missing_file_without_creating_it(tmp_path:
     with pytest.raises(InvalidDatabaseFileError):
         verify_database_file(db_path, ddl_dir)
     assert not db_path.exists()
+
+
+def test_verify_schema_is_current_accepts_latest_without_changing_db(tmp_path: Path) -> None:
+    """同梱のDDLと同じ版は通る。検査で DB は書き換わらない（移行コマンドの前の検査）。"""
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    db_path = _migrated_db(tmp_path, ddl_dir)
+    before = _snapshot(db_path)
+
+    verify_schema_is_current(db_path, ddl_dir)
+
+    assert _snapshot(db_path) == before
+
+
+def test_verify_schema_is_current_rejects_pending_migration(tmp_path: Path) -> None:
+    """未適用の連番SQLがあるときはエラーにし、適用しない（DB を変えない）。"""
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    db_path = _migrated_db(tmp_path, ddl_dir)
+    _write_sql(ddl_dir, "002_create_b.sql", "CREATE TABLE b (id INTEGER PRIMARY KEY);")
+    before = _snapshot(db_path)
+
+    with pytest.raises(PendingMigrationError, match="002_create_b"):
+        verify_schema_is_current(db_path, ddl_dir)
+    assert _snapshot(db_path) == before
+
+
+def test_verify_schema_is_current_rejects_missing_file_without_creating_it(
+    tmp_path: Path,
+) -> None:
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    db_path = tmp_path / "missing.db"
+
+    with pytest.raises(DatabaseNotFoundError):
+        verify_schema_is_current(db_path, ddl_dir)
+    assert not db_path.exists()
+
+
+def test_verify_schema_is_current_rejects_newer_version_and_invalid_file(tmp_path: Path) -> None:
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    _write_sql(ddl_dir, "002_create_b.sql", "CREATE TABLE b (id INTEGER PRIMARY KEY);")
+    db_path = _migrated_db(tmp_path, ddl_dir)
+    (ddl_dir / "002_create_b.sql").unlink()
+    text_path = tmp_path / "text.db"
+    text_path.write_bytes(b"this is not a sqlite database file" * 100)
+
+    with pytest.raises(UnknownMigrationError):
+        verify_schema_is_current(db_path, ddl_dir)
+    with pytest.raises(InvalidDatabaseFileError):
+        verify_schema_is_current(text_path, ddl_dir)
