@@ -34,6 +34,9 @@ class Operation(StrEnum):
     AUTH_SUCCESS = "認証成功"
     AUTH_FAILURE = "認証失敗"
     PASSCODE_SET = "パスコード設定"
+    # バックアップ・復元画面（`SCN-065`）の操作（DDL/024。ユーザー承認 2026-10-27）。
+    BACKUP_CREATE = "バックアップ作成"
+    RESTORE = "復元"
 
 
 @dataclass(frozen=True)

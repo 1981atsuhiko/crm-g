@@ -19,8 +19,12 @@ from pathlib import Path
 
 from crm_g.infrastructure.backup import create_backup
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
+from crm_g.infrastructure.db import open_read_only
 
 _logger = logging.getLogger("crm_g")
+
+# 開発環境でのリポジトリ直下のDDL。配布物でのDDLの同梱は、PH-16で検討する。
+BUNDLED_DDL_DIR = Path(__file__).resolve().parents[3] / "DDL"
 
 
 class InvalidMigrationFilenameError(RuntimeError):
@@ -37,6 +41,10 @@ class ChecksumMismatchError(RuntimeError):
 
 class UnknownMigrationError(RuntimeError):
     """DBのスキーマ版が、アプリの対応版より新しいときのエラー。"""
+
+
+class InvalidDatabaseFileError(RuntimeError):
+    """検査したファイルが、このアプリのDB（`schema_migration` を持つ SQLite）でないときのエラー。"""
 
 
 class MigrationFailedError(RuntimeError):
@@ -121,17 +129,9 @@ def _verify_checksums(files: Sequence[MigrationFile], applied: dict[int, tuple[s
             raise ChecksumMismatchError(f"{file.name} のチェックサムが変わっています")
 
 
-def apply_migrations(
-    connection: sqlite3.Connection, ddl_dir: Path, db_path: Path, backup_dir: Path
-) -> tuple[str, ...]:
-    """未適用の連番SQLを、版番号の順に適用する。適用したファイル名を返す。"""
-    _ensure_migration_table(connection)
-
-    files = _list_migration_files(ddl_dir)
+def _verify_applied(files: Sequence[MigrationFile], applied: dict[int, tuple[str, str]]) -> None:
+    """適用済みの版が同梱のDDLにあり、チェックサムが一致することを確かめる。"""
     file_versions = {file.version for file in files}
-
-    applied = _applied_rows(connection)
-
     unknown_versions = sorted(set(applied) - file_versions)
     if unknown_versions:
         unknown_names = [applied[version][0] for version in unknown_versions]
@@ -141,6 +141,48 @@ def apply_migrations(
         )
 
     _verify_checksums(files, applied)
+
+
+def verify_database_file(db_path: Path, ddl_dir: Path) -> None:
+    """DBファイルのスキーマの版を、同梱のDDLと照らして検査する（書き換えない）。
+
+    バックアップからの復元の前の検査に使う（画面設計書 `SCN-065`）。次のとき
+    エラーにする。SQLite のファイルでない・`schema_migration` がない・版が1つも
+    記録されていない（`InvalidDatabaseFileError`）。同梱のDDLにない版がある
+    （`UnknownMigrationError`。アプリより新しい版・未知の版）。適用済みの版の
+    チェックサムが合わない（`ChecksumMismatchError`）。同梱のDDLより古い版は、
+    エラーにしない（復元の後に、未適用の連番SQLを適用する）。
+    """
+    files = _list_migration_files(ddl_dir)
+    try:
+        connection = open_read_only(db_path)
+    except sqlite3.Error as error:
+        raise InvalidDatabaseFileError("DBファイルを開けません") from error
+    try:
+        try:
+            has_table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migration'"
+            ).fetchone()
+            applied = _applied_rows(connection) if has_table is not None else {}
+        except sqlite3.Error as error:
+            raise InvalidDatabaseFileError("このアプリのDBファイルではありません") from error
+    finally:
+        connection.close()
+
+    if not applied:
+        raise InvalidDatabaseFileError("このアプリのDBファイルではありません")
+    _verify_applied(files, applied)
+
+
+def apply_migrations(
+    connection: sqlite3.Connection, ddl_dir: Path, db_path: Path, backup_dir: Path
+) -> tuple[str, ...]:
+    """未適用の連番SQLを、版番号の順に適用する。適用したファイル名を返す。"""
+    _ensure_migration_table(connection)
+
+    files = _list_migration_files(ddl_dir)
+    applied = _applied_rows(connection)
+    _verify_applied(files, applied)
 
     pending = [file for file in files if file.version not in applied]
     if not pending:

@@ -17,7 +17,7 @@ from streamlit.web import bootstrap  # noqa: TID251 起動用launcherだけの�
 
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.logging_setup import setup_logging
-from crm_g.infrastructure.migration import apply_migrations
+from crm_g.infrastructure.migration import BUNDLED_DDL_DIR, apply_migrations
 from crm_g.infrastructure.paths import get_app_paths
 from crm_g.infrastructure.single_instance import AlreadyRunningError, acquire_lock
 
@@ -26,8 +26,6 @@ _PORT = 8501
 _LOCK_FILE_NAME = "crm-g.lock"
 
 _UI_APP_PATH = Path(__file__).resolve().parent.parent / "ui" / "app.py"
-# 開発環境でのリポジトリ直下のDDL。配布物でのDDLの同梱は、PH-16で検討する。
-_DDL_DIR = Path(__file__).resolve().parents[3] / "DDL"
 
 _BROWSER_OPEN_TIMEOUT_SECONDS = 10.0
 _BROWSER_OPEN_POLL_INTERVAL_SECONDS = 0.1
@@ -109,7 +107,7 @@ def serve() -> int:
                 return 1
 
             with open_connection(paths.db_path) as connection:
-                apply_migrations(connection, _DDL_DIR, paths.db_path, paths.backup_dir)
+                apply_migrations(connection, BUNDLED_DDL_DIR, paths.db_path, paths.backup_dir)
 
             flag_options = _build_flag_options()
             bootstrap.load_config_options(flag_options=flag_options)

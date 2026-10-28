@@ -245,3 +245,40 @@ def test_authenticated_session_can_open_operation_log(localappdata: Path) -> Non
 
     assert _titles(app) == ["操作ログ"]
     assert not app.exception
+
+
+def test_authenticated_session_can_open_backup(localappdata: Path) -> None:
+    db_path = localappdata / "crm-g" / "crm-g.db"
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+    app = AppTest.from_file(str(_APP_PATH), default_timeout=_APPTEST_TIMEOUT_SECONDS)
+    app.session_state[AUTHENTICATED_KEY] = True
+    app = app.run()
+    app.switch_page("views/backup.py")
+    app.run()
+
+    assert _titles(app) == ["バックアップ・復元"]
+    assert not app.exception
+
+
+def test_restore_logs_out_and_shows_login(localappdata: Path) -> None:
+    """復元すると、パスコードも復元の時点に戻るため、そのタブはログイン画面に戻る。"""
+    db_path = localappdata / "crm-g" / "crm-g.db"
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+    app = AppTest.from_file(str(_APP_PATH), default_timeout=_APPTEST_TIMEOUT_SECONDS)
+    app.session_state[AUTHENTICATED_KEY] = True
+    app = app.run()
+    app.switch_page("views/backup.py")
+    app = app.run()
+    app.button(key="backup_create_submit").click()
+    app = app.run()
+    app.button(key="backup_restore").click()
+    app = app.run()
+    app.button(key="backup_restore_confirm_confirm").click()
+    app = app.run()
+
+    assert not app.exception
+    assert _titles(app) == ["ログイン"]
