@@ -13,10 +13,12 @@ from crm_g.infrastructure.backup import restore_backup
 from crm_g.infrastructure.migration import (
     ChecksumMismatchError,
     DuplicateMigrationVersionError,
+    InvalidDatabaseFileError,
     InvalidMigrationFilenameError,
     MigrationFailedError,
     UnknownMigrationError,
     apply_migrations,
+    verify_database_file,
 )
 
 
@@ -190,3 +192,106 @@ def test_apply_migrations_orders_by_integer_version_not_filename_text(tmp_path: 
         assert applied == ("2_create_a", "10_create_b")
     finally:
         connection.close()
+
+
+def _migrated_db(tmp_path: Path, ddl_dir: Path) -> Path:
+    """`ddl_dir` の連番SQLをすべて適用した DB を作る。"""
+    db_path = tmp_path / "verify.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        apply_migrations(connection, ddl_dir, db_path, tmp_path / "backups")
+    finally:
+        connection.close()
+    return db_path
+
+
+def _snapshot(db_path: Path) -> bytes:
+    return db_path.read_bytes()
+
+
+def test_verify_database_file_accepts_current_and_older_versions(tmp_path: Path) -> None:
+    """同梱のDDLと同じ版・古い版は通る。検査でファイルは書き換わらない。"""
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    db_path = _migrated_db(tmp_path, ddl_dir)
+    before = _snapshot(db_path)
+
+    verify_database_file(db_path, ddl_dir)
+    _write_sql(ddl_dir, "002_create_b.sql", "CREATE TABLE b (id INTEGER PRIMARY KEY);")
+    verify_database_file(db_path, ddl_dir)
+
+    assert _snapshot(db_path) == before
+
+
+def test_verify_database_file_rejects_newer_version(tmp_path: Path) -> None:
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    _write_sql(ddl_dir, "002_create_b.sql", "CREATE TABLE b (id INTEGER PRIMARY KEY);")
+    db_path = _migrated_db(tmp_path, ddl_dir)
+    (ddl_dir / "002_create_b.sql").unlink()
+
+    with pytest.raises(UnknownMigrationError, match="002_create_b"):
+        verify_database_file(db_path, ddl_dir)
+
+
+def test_verify_database_file_rejects_checksum_mismatch(tmp_path: Path) -> None:
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    db_path = _migrated_db(tmp_path, ddl_dir)
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER);")
+
+    with pytest.raises(ChecksumMismatchError, match="001_create_a"):
+        verify_database_file(db_path, ddl_dir)
+
+
+def test_verify_database_file_rejects_db_without_schema_migration(tmp_path: Path) -> None:
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    db_path = tmp_path / "other.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("CREATE TABLE other (id INTEGER PRIMARY KEY)")
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(InvalidDatabaseFileError):
+        verify_database_file(db_path, ddl_dir)
+
+
+def test_verify_database_file_rejects_empty_schema_migration(tmp_path: Path) -> None:
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    db_path = tmp_path / "empty.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "CREATE TABLE schema_migration (version INTEGER PRIMARY KEY, name TEXT NOT NULL, "
+            "checksum TEXT NOT NULL, applied_at TEXT NOT NULL) STRICT"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(InvalidDatabaseFileError):
+        verify_database_file(db_path, ddl_dir)
+
+
+def test_verify_database_file_rejects_non_sqlite_file(tmp_path: Path) -> None:
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    db_path = tmp_path / "text.db"
+    db_path.write_bytes(b"this is not a sqlite database file" * 100)
+
+    with pytest.raises(InvalidDatabaseFileError):
+        verify_database_file(db_path, ddl_dir)
+
+
+def test_verify_database_file_rejects_missing_file_without_creating_it(tmp_path: Path) -> None:
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    db_path = tmp_path / "missing.db"
+
+    with pytest.raises(InvalidDatabaseFileError):
+        verify_database_file(db_path, ddl_dir)
+    assert not db_path.exists()

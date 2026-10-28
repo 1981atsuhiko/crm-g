@@ -41,6 +41,18 @@ def open_connection(db_path: Path) -> Iterator[sqlite3.Connection]:
         connection.close()
 
 
+def open_read_only(db_path: Path) -> sqlite3.Connection:
+    """DBファイルを読み取り専用で開く。ファイルを作らず、書き換えもしない。
+
+    バックアップのファイルの検査・復元の読み出しに使う（画面設計書 `SCN-065`）。
+    `mode=ro` の URI で開くため、存在しないファイルは作らずにエラーにする。
+    使い終わったら、呼び出し側が必ず `close()` する。
+    """
+    _check_sqlite_version()
+    uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    return sqlite3.connect(uri, uri=True)
+
+
 @contextmanager
 def transaction(connection: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     """1ユースケース1トランザクションの単位を表す。
