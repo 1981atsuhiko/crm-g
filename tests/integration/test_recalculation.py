@@ -17,7 +17,9 @@ from crm_g.application.recalculation import (
     calculated_open_months,
     is_month_closed,
     list_calculation_errors,
+    months_between,
     recalculate_month,
+    recalculate_range,
     recalculate_since,
     run_manual_recalculation,
 )
@@ -588,3 +590,62 @@ def test_recalculate_month_with_employee_ids_targets_only_them(
 
     assert (result.saved_count, result.errors) == (1, ())
     assert connection.execute("SELECT employee_id FROM monthly_payroll").fetchall() == [(1,)]
+
+
+def test_months_between_crosses_the_year_and_is_empty_when_reversed() -> None:
+    """取込の後の再計算の月の範囲（`MIG-054`）。年をまたぐ。逆順なら空。"""
+    assert months_between(date(2025, 11, 30), date(2026, 2, 1)) == (
+        "2025-11",
+        "2025-12",
+        "2026-01",
+        "2026-02",
+    )
+    assert months_between(date(2026, 3, 1), date(2026, 2, 28)) == ()
+
+
+def test_recalculate_range_includes_months_not_yet_calculated(
+    connection: sqlite3.Connection,
+) -> None:
+    """取込の後の再計算は、未計算の月も計算する（`MIG-054`、ユーザー承認 2026-10-27）。"""
+    _salary(connection)
+    _period(connection, date(2026, 10, 1), None, "WAIT_FULL")
+    assert calculated_open_months(connection, date(2026, 10, 1)) == ()
+
+    result = recalculate_range(connection, date(2026, 10, 15), date(2026, 11, 3), [1])
+    connection.commit()
+
+    assert (result.year_months, result.saved_count, result.errors) == (
+        ("2026-10", "2026-11"),
+        2,
+        (),
+    )
+    assert result.closed_months == ()
+    assert _payroll(connection, "2026-10") is not None
+    assert _payroll(connection, "2026-11") is not None
+
+
+def test_recalculate_range_skips_closed_months_and_other_employees(
+    connection: sqlite3.Connection,
+) -> None:
+    """締め済みの月は計算しない。指定した社員だけを計算する。"""
+    connection.execute(
+        "INSERT INTO employee "
+        "(id, email, name, enrollment_status, join_date, created_at, updated_at) VALUES "
+        "(2, 'hanako@example.com', '鈴木花子', '在籍', '2020-04-01', ?, ?)",
+        (_TIMESTAMP, _TIMESTAMP),
+    )
+    _salary(connection)
+    _salary(connection, employee_id=2)
+    _period(connection, date(2026, 10, 1), None, "WAIT_FULL")
+    recalculate_month(connection, "2026-10", employee_ids=[1])
+    connection.commit()
+    _close(connection, "2026-10")
+
+    result = recalculate_range(connection, date(2026, 10, 1), date(2026, 11, 30), [2])
+    connection.commit()
+
+    assert (result.year_months, result.closed_months) == (("2026-11",), ("2026-10",))
+    rows = connection.execute(
+        "SELECT employee_id, year_month FROM monthly_payroll ORDER BY year_month"
+    ).fetchall()
+    assert rows == [(1, "2026-10"), (2, "2026-11")]
