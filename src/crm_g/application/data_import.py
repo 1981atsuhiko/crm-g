@@ -20,7 +20,7 @@
 
 import logging
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from datetime import date
 from enum import StrEnum
@@ -29,6 +29,12 @@ from pathlib import Path
 from crm_g.application.import_common import ImportIssue
 from crm_g.application.import_employee import insert_employees, validate_employee_csv
 from crm_g.application.import_matching import EmployeeMatch, UnmatchedPerson, unmatched_people
+from crm_g.application.import_rate_history import insert_rate_histories, validate_rate_history_csv
+from crm_g.application.import_salary_history import (
+    insert_salary_histories,
+    validate_salary_history_csv,
+)
+from crm_g.application.import_work_period import insert_work_periods, validate_work_period_csv
 from crm_g.application.operation_log import Operation, OperationLogDetail, record_operation_log
 from crm_g.application.recalculation import RecalculationResult, recalculate_range
 from crm_g.infrastructure.backup import create_backup
@@ -44,6 +50,9 @@ class ImportKind(StrEnum):
     """取込の種類の識別子（移行設計書 2.1 `MIG-010`。移行コマンドの引数）。"""
 
     EMPLOYEE = "employee"
+    SALARY_HISTORY = "salary-history"
+    WORK_PERIOD = "work-period"
+    RATE_HISTORY = "rate-history"
 
     @property
     def label(self) -> str:
@@ -160,9 +169,104 @@ def _validate_employee(
     )
 
 
+def _recalculation_request(
+    targets: Iterable[tuple[int, date]],
+) -> RecalculationRequest | None:
+    """取り込んだ行の（社員、開始日）から、再計算の対象を作る（`MIG-054`）。行がなければ `None`。
+
+    対象は、取り込んだ行の社員について、最も早い開始日（適用開始日）の月から今月まで。
+    """
+    pairs = list(targets)
+    if not pairs:
+        return None
+    employee_ids = tuple(sorted({employee_id for employee_id, _ in pairs}))
+    return RecalculationRequest(employee_ids, min(day for _, day in pairs))
+
+
+def _validate_salary_history(
+    connection: sqlite3.Connection, content: bytes, today: date
+) -> ValidatedImport:
+    """`IMP-02` 給与履歴の検証。取込の後に、取り込んだ社員を再計算する（`MIG-054`）。"""
+    del today  # 給与履歴の検証は、今日の日付を使わない。
+    validation = validate_salary_history_csv(connection, content)
+
+    def insert(target: sqlite3.Connection) -> InsertOutcome:
+        return InsertOutcome(
+            imported_count=insert_salary_histories(target, validation.records),
+            recalculation=_recalculation_request(
+                (record.employee_id, record.effective_from) for record in validation.records
+            ),
+        )
+
+    return ValidatedImport(
+        row_count=validation.row_count,
+        excluded_columns=validation.excluded_columns,
+        issues=validation.issues,
+        insert=insert,
+        matches=validation.matches,
+    )
+
+
+def _validate_work_period(
+    connection: sqlite3.Connection, content: bytes, today: date
+) -> ValidatedImport:
+    """`IMP-03` 稼働期間の検証。取込の後に、取り込んだ社員を再計算する（`MIG-054`）。"""
+    del today  # 稼働期間の検証は、今日の日付を使わない。
+    validation = validate_work_period_csv(connection, content)
+
+    def insert(target: sqlite3.Connection) -> InsertOutcome:
+        return InsertOutcome(
+            imported_count=insert_work_periods(target, validation.records, validation.assignments),
+            recalculation=_recalculation_request(
+                (record.employee_id, record.start_date) for record in validation.records
+            ),
+        )
+
+    return ValidatedImport(
+        row_count=validation.row_count,
+        excluded_columns=validation.excluded_columns,
+        issues=validation.issues,
+        insert=insert,
+        matches=validation.matches,
+    )
+
+
+def _validate_rate_history(
+    connection: sqlite3.Connection, content: bytes, today: date
+) -> ValidatedImport:
+    """`IMP-04` 単価履歴の検証。取込の後に、取り込んだ社員を再計算する（`MIG-054`）。"""
+    del today  # 単価履歴の検証は、今日の日付を使わない。
+    validation = validate_rate_history_csv(connection, content)
+
+    def insert(target: sqlite3.Connection) -> InsertOutcome:
+        return InsertOutcome(
+            imported_count=insert_rate_histories(target, validation.records),
+            recalculation=_recalculation_request(
+                (record.employee_id, record.effective_from) for record in validation.records
+            ),
+        )
+
+    return ValidatedImport(
+        row_count=validation.row_count,
+        excluded_columns=validation.excluded_columns,
+        issues=validation.issues,
+        insert=insert,
+        matches=validation.matches,
+    )
+
+
 _DEFINITIONS: dict[ImportKind, ImportKindDefinition] = {
     ImportKind.EMPLOYEE: ImportKindDefinition(
         label="社員", target_table="employee", validate=_validate_employee
+    ),
+    ImportKind.SALARY_HISTORY: ImportKindDefinition(
+        label="給与履歴", target_table="salary_history", validate=_validate_salary_history
+    ),
+    ImportKind.WORK_PERIOD: ImportKindDefinition(
+        label="稼働期間", target_table="work_period", validate=_validate_work_period
+    ),
+    ImportKind.RATE_HISTORY: ImportKindDefinition(
+        label="単価履歴", target_table="rate_history", validate=_validate_rate_history
     ),
 }
 
