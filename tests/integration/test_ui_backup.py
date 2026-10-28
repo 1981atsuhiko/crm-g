@@ -112,6 +112,8 @@ def test_tc_scn_021_create_list_and_restore(data_dir: Path) -> None:
     assert "ログアウトします" in message
     assert _cost_coefficient(data_dir) == original + 500
 
+    # 閲覧ログの重複防止（UID-060）の状態も、復元の後は残さない。
+    app.session_state["crm_g_last_logged_view_target"] = {"salary_history": ["SCN-021", "7"]}
     app.button(key="backup_restore_confirm_confirm").click()
     app = app.run()
 
@@ -119,6 +121,7 @@ def test_tc_scn_021_create_list_and_restore(data_dir: Path) -> None:
     assert _cost_coefficient(data_dir) == original
     assert len(_backup_names(data_dir)) == 2
     assert AUTHENTICATED_KEY not in app.session_state
+    assert "crm_g_last_logged_view_target" not in app.session_state
     assert any("復元しました" in toast.value for toast in app.toast)
 
 

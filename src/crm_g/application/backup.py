@@ -27,7 +27,7 @@ from crm_g.infrastructure.backup import (
     verify_backup_integrity,
     write_backup,
 )
-from crm_g.infrastructure.db import open_connection, transaction
+from crm_g.infrastructure.db import open_connection, open_read_only, transaction
 from crm_g.infrastructure.migration import (
     ChecksumMismatchError,
     InvalidDatabaseFileError,
@@ -106,7 +106,8 @@ def parse_backup_destination(text: str) -> Path | None:
     destination = Path(stripped)
     if not destination.is_absolute():
         raise BackupDestinationError(
-            "作成先は、ドライブ名から始まるフォルダのパス（例：D:\\backup）で指定してください"
+            "作成先は、ドライブ名（例：D:\\backup）または共有フォルダ（例：\\\\サーバー\\共有）"
+            "から始まるフォルダのパスで指定してください"
         )
     if not destination.is_dir():
         raise BackupDestinationError("作成先のフォルダが見つかりません")
@@ -175,6 +176,21 @@ def _verify_backup(backup_path: Path, ddl_dir: Path) -> None:
         raise InvalidBackupError(
             "バックアップのスキーマが、このアプリの版と一致しないため、復元できません"
         ) from error
+    if not _has_passcode(backup_path):
+        # 復元するとパスコードも戻る。未設定の状態に戻すと、誰でも最初の設定が
+        # できてしまうため、復元しない（権限・セキュリティ設計書 `SCD-011`）。
+        raise InvalidBackupError("パスコードが設定される前のバックアップのため、復元できません")
+
+
+def _has_passcode(backup_path: Path) -> bool:
+    """バックアップに、パスコードが設定されているか。"""
+    connection = open_read_only(backup_path)
+    try:
+        return (
+            connection.execute("SELECT 1 FROM app_credential WHERE id = 1").fetchone() is not None
+        )
+    finally:
+        connection.close()
 
 
 def restore_from_backup(

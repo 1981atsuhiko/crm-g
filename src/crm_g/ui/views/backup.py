@@ -28,10 +28,10 @@ from crm_g.application.backup import (
     parse_backup_destination,
     restore_from_backup,
 )
-from crm_g.application.operation_log import JST
 from crm_g.infrastructure.migration import BUNDLED_DDL_DIR
 from crm_g.infrastructure.paths import get_app_paths
 from crm_g.ui.components.confirm_dialog import confirm_dialog
+from crm_g.ui.components.formatting import format_datetime
 from crm_g.ui.components.messages import (
     UNEXPECTED_ERROR_MESSAGE,
     show_errors,
@@ -40,7 +40,6 @@ from crm_g.ui.components.messages import (
     show_unexpected_error,
     show_warning,
 )
-from crm_g.ui.session import AUTHENTICATED_KEY
 
 _PENDING_KEY = "backup_restore_pending"
 _LAST_RESULT_KEY = "backup_last_result"
@@ -63,8 +62,8 @@ class _Pending(TypedDict):
 
 
 def _format_created_at(entry: BackupEntry) -> str:
-    """作成日時を、日本時間で表示する。"""
-    return entry.created_at.astimezone(JST).strftime("%Y/%m/%d %H:%M:%S")
+    """作成日時を、日本時間の `UID-041` の形式で表示する。"""
+    return format_datetime(entry.created_at)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -109,8 +108,10 @@ def _render_pending(db_path: Path, backup_dir: Path) -> None:
         except Exception:
             st.session_state[_LAST_ERROR_KEY] = UNEXPECTED_ERROR_MESSAGE
         else:
-            # パスコードも復元の時点に戻るため、このタブはログアウトする。
-            st.session_state.pop(AUTHENTICATED_KEY, None)
+            # パスコードも復元の時点に戻るため、このタブはログアウトする。閲覧ログの
+            # 重複防止（`UID-060`）などの画面の状態も、復元の前の DB に基づくため、
+            # すべて消す。
+            st.session_state.clear()
             show_success(f"{result.restored_name} から復元しました。もう一度ログインしてください")
 
     def _cancel() -> None:
@@ -139,8 +140,9 @@ def _render_create(db_path: Path, backup_dir: Path) -> None:
         return
 
     try:
-        destination = parse_backup_destination(destination_text)
+        # 接続できない共有フォルダの確認は時間がかかるため、検証も処理中の表示に含める。
         with st.spinner("バックアップを作成しています…"):
+            destination = parse_backup_destination(destination_text)
             file_name = create_manual_backup(db_path, backup_dir, destination)
     except (BackupDestinationError, BackupCreationError) as error:
         show_errors([str(error)])

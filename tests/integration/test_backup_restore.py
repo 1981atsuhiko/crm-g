@@ -264,6 +264,7 @@ def test_restore_old_version_backup_applies_pending_migrations(
     old_db = tmp_path / "old.db"
     with open_connection(old_db) as connection:
         apply_migrations(connection, old_ddl, old_db, tmp_path / "old_backups")
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
     old_backup = create_backup(old_db, paths.backup_dir)
 
     result = restore_from_backup(paths.db_path, paths.backup_dir, _DDL_DIR, old_backup.name)
@@ -401,3 +402,27 @@ def test_restore_reports_when_roll_back_also_fails(
     # 利用者が手で戻せるよう、復元の前のバックアップのファイル名（パスではない）を伝える。
     assert calls[1] in str(excinfo.value)
     assert str(paths.root) not in str(excinfo.value)
+
+
+def test_restore_rejects_backup_without_passcode(paths: _Paths, tmp_path: Path) -> None:
+    """パスコードが設定される前のバックアップは、復元しない（誰でも最初の設定ができてしまうため）。"""
+    no_passcode_db = tmp_path / "no_passcode.db"
+    with open_connection(no_passcode_db) as connection:
+        apply_migrations(connection, _DDL_DIR, no_passcode_db, tmp_path / "other_backups")
+    backup = create_backup(no_passcode_db, paths.backup_dir)
+    expected = _cost_coefficient(paths.db_path)
+    names = _backup_names(paths.backup_dir)
+
+    with pytest.raises(InvalidBackupError, match="パスコードが設定される前"):
+        restore_from_backup(paths.db_path, paths.backup_dir, _DDL_DIR, backup.name)
+
+    _assert_not_restored(paths, expected, names)
+
+
+def test_destination_accepts_unc_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """共有フォルダ（UNC）のパスも、作成先として受け付ける（ユーザー承認 2026-10-28）。"""
+    monkeypatch.setattr(Path, "is_dir", lambda _self: True)
+
+    unc = "\\\\server\\share\\backup"
+
+    assert backup_app.parse_backup_destination(unc) == Path(unc)
