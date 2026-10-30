@@ -584,6 +584,49 @@ def recalculate_since(
     )
 
 
+def months_between(since: date, until: date) -> tuple[str, ...]:
+    """`since` の月から `until` の月までの年月（`YYYY-MM`）を、古い順に返す。
+
+    `since` の月が `until` の月より後なら、空にする。
+    """
+    months: list[str] = []
+    year, month = since.year, since.month
+    while (year, month) <= (until.year, until.month):
+        months.append(year_month_text(year, month))
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    return tuple(months)
+
+
+def recalculate_range(
+    connection: sqlite3.Connection,
+    since: date,
+    current: date,
+    employee_ids: Sequence[int],
+) -> RecalculationResult:
+    """取込の後の再計算（移行設計書 `MIG-054`、ユーザー承認 2026-10-27）。
+
+    トランザクションは開始しない。呼び出し側（取込の実行）のトランザクションの中で呼ぶ。
+
+    `employee_ids` の社員について、`since` の月から `current` の月（今月。呼び出し側が渡す）
+    までの締め前の月を、未計算の月も含めて計算する。締め済みの月は計算せず、
+    `closed_months` に入れる。画面の更新のあとの再計算（`recalculate_since`。計算済みの月
+    だけ）とは、対象の月の決め方が異なる。
+    """
+    months: list[str] = []
+    closed: list[str] = []
+    saved = 0
+    errors: list[CalculationError] = []
+    for year_month in months_between(since, current):
+        if is_month_closed(connection, year_month):
+            closed.append(year_month)
+            continue
+        result = recalculate_month(connection, year_month, employee_ids)
+        months.extend(result.year_months)
+        saved += result.saved_count
+        errors.extend(result.errors)
+    return RecalculationResult(tuple(months), saved, tuple(errors), tuple(closed))
+
+
 def _closed_months(
     connection: sqlite3.Connection, since: date, employee_ids: Sequence[int] | None
 ) -> tuple[str, ...]:
