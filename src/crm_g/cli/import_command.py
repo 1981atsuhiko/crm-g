@@ -9,7 +9,9 @@
 - マイグレーションは適用しない。DB がないとき・未適用の連番SQLがあるときは、DB を変えずに、
   アプリを一度起動するよう案内する（ユーザー承認 2026-10-27）
 - 終了コードは、`0`：エラーなし、`1`：検証のエラーがある（取り込んでいない）、
-  `2`：実行できない（`MGD-009`）
+  `2`：実行できない（引数の誤り、アプリの起動中、DB の版が合わない、取込前のバックアップを
+  作れない、例外。`MGD-009`）。`2` のときは、値・パスを出さない一般的なメッセージと、
+  復元の案内を出す
 - レポート（`MIG-061`）は、標準出力に出す。名寄せで一致しなかった人の氏名は、標準出力にだけ
   出し、ログには件数だけを出す（`MIG-005`、`SCD-042`）
 
@@ -26,13 +28,15 @@ from pathlib import Path
 
 from crm_g.application.data_import import (
     ERROR_DISPLAY_LIMIT,
+    ImportInTransactionError,
     ImportKind,
     ImportReport,
     check_import,
     run_import,
 )
-from crm_g.application.import_common import ImportIssue
+from crm_g.application.import_common import HEADER_LINE_NUMBER, ImportErrorCode, ImportIssue
 from crm_g.application.import_matching import UnmatchedPerson
+from crm_g.infrastructure.backup import BackupWriteError
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.logging_setup import setup_logging
 from crm_g.infrastructure.migration import (
@@ -61,7 +65,8 @@ EXIT_SUCCESS = 0
 EXIT_VALIDATION_ERROR = 1
 """検証のエラーがある（取り込んでいない）。"""
 EXIT_CANNOT_RUN = 2
-"""実行できない（引数の誤り、アプリの起動中、ファイルが開けない、DB の版が合わない、例外）。"""
+"""実行できない（引数の誤り、アプリの起動中、ファイルが開けない、DB の版が合わない、
+取込前のバックアップを作れない、例外）。"""
 
 _CHECK_OPTION = "--check"
 _HELP_OPTIONS = ("-h", "--help")
@@ -80,7 +85,31 @@ _VERSION_MISMATCH_MESSAGE = (
 )
 _ALREADY_RUNNING_MESSAGE = "アプリが起動中です。アプリを終了してから、やり直してください。"
 _CANNOT_OPEN_MESSAGE = "CSV ファイルを開けません。パスを確認してください。"
-_UNEXPECTED_MESSAGE = "取込に失敗しました。詳しくはログを確認してください。"
+_UNEXPECTED_MESSAGE = (
+    "取込に失敗しました。詳しくはログを確認してください。\n"
+    "  取り込みは行っていません。データの状態が気になるときは、アプリの「設定」の"
+    "「バックアップ・復元」で、取込前のバックアップから復元できます。"
+)
+_NOT_STARTED_GUIDE = (
+    "  取り込みは行っていません。データの状態が気になるときは、アプリの「設定」の"
+    "「バックアップ・復元」で、以前のバックアップから復元できます。"
+)
+_BACKUP_FAILURE_MESSAGE = (
+    "取込前のバックアップを作成できなかったため、取り込みませんでした。"
+    "保存先の空き容量と書き込みの権限を確認してから、やり直してください。\n" + _NOT_STARTED_GUIDE
+)
+_IN_TRANSACTION_MESSAGE = (
+    "取込を開始できませんでした。詳しくはログを確認してください。\n" + _NOT_STARTED_GUIDE
+)
+_NO_HEADER_HINT = (
+    "  E002: 1行目が見出し行（列名）になっているか、ファイルが CSV として読めるか"
+    "（閉じていない引用符・大きすぎるセルなどがないか）を確認してください。"
+)
+_AMBIGUOUS_PAY_ITEM_HINT = (
+    "  見出し行の E015: 給与項目マスタに、表記をそろえると同じになる名称（またはほかの列と"
+    "同じになる名称）があるため、どの給与項目の列か決まりません。"
+    "アプリの「給与項目」で、名称を見直してください。"
+)
 
 
 class _UsageError(Exception):
@@ -154,11 +183,26 @@ def _matching_lines(report: ImportReport) -> list[str]:
     return output
 
 
+def _issue_hints(report: ImportReport) -> list[str]:
+    """エラーの種類に応じた、直し方の案内（ファイル全体の `E002`、給与項目の列の `E015`）。"""
+    hints: list[str] = []
+    if any(issue.code is ImportErrorCode.NO_HEADER for issue in report.issues):
+        hints.append(_NO_HEADER_HINT)
+    if any(
+        issue.code is ImportErrorCode.REFERENCE_NOT_RESOLVED
+        and issue.line_number == HEADER_LINE_NUMBER
+        for issue in report.issues
+    ):
+        hints.append(_AMBIGUOUS_PAY_ITEM_HINT)
+    return hints
+
+
 def _error_lines(report: ImportReport) -> list[str]:
     """エラーの一覧の行。先頭の `ERROR_DISPLAY_LIMIT` 件と、総数を出す（`MGD-008`）。"""
     output = [f"エラー: {report.error_count:,} 件"]
     if not report.has_errors:
         return output
+    output.extend(_issue_hints(report))
     if report.error_count > ERROR_DISPLAY_LIMIT:
         output.append(
             f"  （先頭の {ERROR_DISPLAY_LIMIT:,} 件を表示します。全 {report.error_count:,} 件）"
@@ -170,6 +214,14 @@ def _error_lines(report: ImportReport) -> list[str]:
 
 def _result_lines(report: ImportReport, *, check_only: bool) -> list[str]:
     """結果の行（取り込んだときは、取り込み結果。`MIG-061`）。"""
+    if report.has_errors and not check_only and report.backup_path is not None:
+        # 書き込みのロックの後の再検証で失敗した。取込前のバックアップだけが残る（MIG-050）。
+        return [
+            "結果: 実行の直前にデータが変わり、エラーになったため、取り込みませんでした。"
+            "修正して、確認からやり直してください。",
+            f"取込前のバックアップ: {report.backup_path.name}",
+            "  取込前のバックアップは作成しましたが、データは変更していません。",
+        ]
     if report.has_errors:
         return [
             "結果: エラーがあるため、取り込みませんでした。修正して、確認からやり直してください。"
@@ -232,18 +284,27 @@ def _execute(parsed: ImportArguments, paths: AppPaths) -> int:
         return EXIT_CANNOT_RUN
 
     today = date.today()
-    with open_connection(paths.db_path) as connection:
-        if parsed.check_only:
-            report = check_import(connection, parsed.kind, content, today)
-        else:
-            report = run_import(
-                connection,
-                parsed.kind,
-                content,
-                today,
-                db_path=paths.db_path,
-                backup_dir=paths.backup_dir,
-            )
+    try:
+        with open_connection(paths.db_path) as connection:
+            if parsed.check_only:
+                report = check_import(connection, parsed.kind, content, today)
+            else:
+                report = run_import(
+                    connection,
+                    parsed.kind,
+                    content,
+                    today,
+                    db_path=paths.db_path,
+                    backup_dir=paths.backup_dir,
+                )
+    except BackupWriteError:
+        # 原因はアプリケーション層がログに残す。文言はパスを含みうるため、出さない（ARC-018）。
+        print(_BACKUP_FAILURE_MESSAGE)
+        return EXIT_CANNOT_RUN
+    except ImportInTransactionError:
+        _logger.error("取込を開始できませんでした（例外=ImportInTransactionError）")
+        print(_IN_TRANSACTION_MESSAGE)
+        return EXIT_CANNOT_RUN
     print(format_report(report, check_only=parsed.check_only))
     # 一致しなかった人の一覧は氏名を含むため、ログには件数だけを出す（MIG-005）。
     _logger.info(

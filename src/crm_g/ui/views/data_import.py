@@ -10,21 +10,28 @@
 取込を実行したとき、取込の種類・ファイルを変えたとき、画面を離れたとき（`app.py`）に破棄する。
 エラーの一覧には、値を出さない（行番号・項目・原因だけ。`MIG-005`）。一致しなかった人の
 氏名は、画面にだけ出す（`MIG-032`）。
+
+取込前のバックアップを作れないとき（`BackupWriteError`）・取込の中の例外は、値・パスを出さない
+一般的なメッセージと、復元の案内を出す（`ARC-018`）。書き込みのロックの後の再検証で失敗した
+ときは、取り込まず、作成した取込前のバックアップのファイル名を示す。
 """
 
 from datetime import date
+from enum import StrEnum
 from typing import TypedDict
 
 import streamlit as st
 
 from crm_g.application.data_import import (
     ERROR_DISPLAY_LIMIT,
+    ImportInTransactionError,
     ImportKind,
     ImportReport,
     check_import,
     run_import,
 )
-from crm_g.application.import_common import ImportErrorCode
+from crm_g.application.import_common import HEADER_LINE_NUMBER, ImportErrorCode
+from crm_g.infrastructure.backup import BackupWriteError
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.paths import get_app_paths
 from crm_g.ui.components.confirm_dialog import confirm_dialog
@@ -61,6 +68,36 @@ _FAILURE_GUIDE = (
     "取り込みは行っていません。データの状態が気になるときは、「設定」の「バックアップ・復元」で、"
     "取込前のバックアップから復元できます。"
 )
+# 取込前のバックアップを作る前に止まったとき（取込前のバックアップはない）の案内。
+_NOT_STARTED_GUIDE = (
+    "取り込みは行っていません。データの状態が気になるときは、「設定」の「バックアップ・復元」で、"
+    "以前のバックアップから復元できます。"
+)
+_BACKUP_FAILURE_MESSAGE = (
+    "取込前のバックアップを作成できなかったため、取り込みませんでした。"
+    "保存先の空き容量と書き込みの権限を確認してから、確認の実行からやり直してください。"
+)
+_REVALIDATION_BACKUP_NOTICE = (
+    "取込前のバックアップは作成しましたが、データは変更していません。"
+    "CSV またはデータを見直して、確認の実行からやり直してください。"
+)
+_NO_HEADER_HINT = (
+    "E002：1行目が見出し行（列名）になっているか、ファイルが CSV として読めるか"
+    "（閉じていない引用符・大きすぎるセルなどがないか）を確認してください。"
+)
+_AMBIGUOUS_PAY_ITEM_HINT = (
+    "見出し行の E015：給与項目マスタに、表記をそろえると同じになる名称（またはほかの列と"
+    "同じになる名称）があるため、どの給与項目の列か決まりません。"
+    "「給与項目」で、名称を見直してください。"
+)
+
+
+class _Failure(StrEnum):
+    """取込の実行が、例外で止まったときの原因の分類（画面に出す文言を選ぶため）。"""
+
+    BACKUP = "backup"
+    UNEXPECTED = "unexpected"
+    NOT_STARTED = "not_started"
 
 
 class _Checked(TypedDict):
@@ -76,10 +113,14 @@ class _Checked(TypedDict):
 
 
 class _Result(TypedDict):
-    """取込の実行の結果。`report` は、例外で失敗したときは `None`。"""
+    """取込の実行の結果。`report` は、例外で失敗したときは `None` で、`failure` に原因を持つ。
+
+    `failure` は `_Failure` の値（再実行をまたぐため、文字列で持つ）。成功・検証のエラーは `None`。
+    """
 
     kind: str
     report: ImportReport | None
+    failure: str | None
 
 
 def _code_text(code: ImportErrorCode) -> str:
@@ -110,6 +151,20 @@ def _render_matching(report: ImportReport) -> None:
     )
 
 
+def _issue_hints(report: ImportReport) -> list[str]:
+    """エラーの種類に応じた、直し方の案内（ファイル全体の `E002`、給与項目の列の `E015`）。"""
+    hints: list[str] = []
+    if any(issue.code is ImportErrorCode.NO_HEADER for issue in report.issues):
+        hints.append(_NO_HEADER_HINT)
+    if any(
+        issue.code is ImportErrorCode.REFERENCE_NOT_RESOLVED
+        and issue.line_number == HEADER_LINE_NUMBER
+        for issue in report.issues
+    ):
+        hints.append(_AMBIGUOUS_PAY_ITEM_HINT)
+    return hints
+
+
 def _render_issues(report: ImportReport) -> None:
     """エラーの一覧（行番号・項目・原因。先頭の 1,000 件と総数。`MIG-061`、`MGD-008`）。"""
     show_errors(
@@ -118,6 +173,8 @@ def _render_issues(report: ImportReport) -> None:
             "CSV を修正して、確認からやり直してください。"
         ]
     )
+    for hint in _issue_hints(report):
+        show_status(hint)
     if report.error_count > ERROR_DISPLAY_LIMIT:
         show_status(
             f"先頭の {ERROR_DISPLAY_LIMIT:,} 件を表示しています（全 {report.error_count:,} 件）。"
@@ -154,12 +211,15 @@ def _render_result(result: _Result) -> None:
     st.subheader("取込の結果")
     report = result["report"]
     if report is None:
-        show_errors([UNEXPECTED_ERROR_MESSAGE])
-        show_status(_FAILURE_GUIDE)
+        _render_failure(result["failure"])
         return
     if not report.executed:
-        # 確認の後に DB が変わり、取込の実行の中の再検証でエラーになったとき（MIG-050）。
+        # 確認の後に DB が変わり、取込の実行の中の検証・再検証でエラーになったとき（MIG-050）。
         show_warning("確認の後にデータが変わったため、取り込みませんでした。")
+        if report.backup_path is not None:
+            # 書き込みのロックの後の再検証で失敗したときは、取込前のバックアップが残る。
+            st.markdown(f"**取込前のバックアップ**：{report.backup_path.name}")
+            show_status(_REVALIDATION_BACKUP_NOTICE)
         _render_report(report)
         return
     st.markdown(f"**取込の種類**：{report.kind.label}")
@@ -177,6 +237,19 @@ def _render_result(result: _Result) -> None:
     show_status(_RESTORE_GUIDE)
 
 
+def _render_failure(failure: str | None) -> None:
+    """例外で止まったときの表示。値・パスは出さず、一般的なメッセージと復元の案内を出す。"""
+    if failure == _Failure.BACKUP:
+        show_errors([_BACKUP_FAILURE_MESSAGE])
+        show_status(_NOT_STARTED_GUIDE)
+    elif failure == _Failure.NOT_STARTED:
+        show_errors([UNEXPECTED_ERROR_MESSAGE])
+        show_status(_NOT_STARTED_GUIDE)
+    else:
+        show_errors([UNEXPECTED_ERROR_MESSAGE])
+        show_status(_FAILURE_GUIDE)
+
+
 def _execute(checked: _Checked) -> None:
     """取込の実行（確認ダイアログの「実行」）。結果は、ダイアログが閉じた後に表示する。"""
     kind = ImportKind(checked["kind"])
@@ -187,7 +260,8 @@ def _execute(checked: _Checked) -> None:
     st.session_state[_UPLOADER_GENERATION_KEY] = (
         st.session_state.get(_UPLOADER_GENERATION_KEY, 0) + 1
     )
-    report: ImportReport | None
+    report: ImportReport | None = None
+    failure: _Failure | None = None
     try:
         with (
             st.spinner("取り込んでいます…"),
@@ -201,10 +275,19 @@ def _execute(checked: _Checked) -> None:
                 db_path=paths.db_path,
                 backup_dir=paths.backup_dir,
             )
+    except BackupWriteError:
+        # 取込前のバックアップを作れず、取り込まなかった（MIG-053）。原因はアプリケーション層が
+        # ログに残す。例外の文言はパスを含みうるため、画面に出さない（ARC-018）。
+        failure = _Failure.BACKUP
+    except ImportInTransactionError:
+        # 取込を始める前に止まった（取込前のバックアップも作っていない）。
+        failure = _Failure.NOT_STARTED
     except Exception:
         # 原因はアプリケーション層がログに残す。画面には一般的なメッセージを出す（ARC-018）。
-        report = None
-    st.session_state[IMPORT_RESULT_KEY] = _Result(kind=kind.value, report=report)
+        failure = _Failure.UNEXPECTED
+    st.session_state[IMPORT_RESULT_KEY] = _Result(
+        kind=kind.value, report=report, failure=None if failure is None else failure.value
+    )
     if report is not None and report.executed:
         show_success(f"{kind.label}を取り込みました")
 

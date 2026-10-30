@@ -8,12 +8,21 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
 import pytest
 
-from crm_g.application.data_import import ERROR_DISPLAY_LIMIT, ImportKind, ImportReport
+import crm_g.application.data_import as data_import_app
+from crm_g.application.data_import import (
+    ERROR_DISPLAY_LIMIT,
+    ImportInTransactionError,
+    ImportKind,
+    ImportKindDefinition,
+    ImportReport,
+    ValidatedImport,
+)
 from crm_g.application.import_common import ImportErrorCode, ImportIssue
 from crm_g.application.import_matching import UnmatchedPerson
 from crm_g.application.recalculation import (
@@ -371,6 +380,7 @@ def test_unexpected_exception_exits_with_2_and_logs_only_the_type(
     assert exit_code == 2
     output = capsys.readouterr().out
     assert "取込に失敗しました" in output
+    assert "取込前のバックアップから復元できます" in output
     assert "山田" not in output
     log_text = _log_text(data_dir)
     assert "例外=RuntimeError" in log_text
@@ -547,3 +557,142 @@ def test_sqlite_connection_is_not_left_open(data_dir: Path, tmp_path: Path) -> N
     connection.close()
     (data_dir / "crm-g.db").unlink()
     assert not (data_dir / "crm-g.db").exists()
+
+
+def test_backup_failure_exits_with_2_without_path(
+    data_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """取込前のバックアップを作れないと、取り込まず終了コード 2。パスは出さない（`MIG-053`）。"""
+    csv_path = _write_csv(tmp_path, "employee.csv", _csv(_EMPLOYEE_HEADER, _TARO))
+
+    def _fail_copy(_source: Path, destination: Path) -> None:
+        destination.write_bytes(b"partial")
+        raise OSError(f"書き込めません: {destination}")
+
+    monkeypatch.setattr("crm_g.infrastructure.backup._copy_database", _fail_copy)
+
+    exit_code = main(["import", "employee", str(csv_path)])
+
+    output = capsys.readouterr().out
+    assert exit_code == 2
+    assert "取込前のバックアップを作成できなかったため、取り込みませんでした" in output
+    assert "以前のバックアップから復元できます" in output
+    assert "取込に失敗しました" not in output
+    assert str(data_dir) not in output
+    assert "crm-g_" not in output
+    assert _employee_count(data_dir) == 0
+    assert _operation_count(data_dir) == 0
+    assert _backups(data_dir) == []
+    log_text = _log_text(data_dir)
+    assert "例外=BackupWriteError" in log_text
+    assert str(data_dir / "backups") not in log_text
+
+
+def test_in_transaction_error_exits_with_2(
+    data_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """取込を始める前に止まったとき（`ImportInTransactionError`）は、終了コード 2。"""
+    csv_path = _write_csv(tmp_path, "employee.csv", _csv(_EMPLOYEE_HEADER, _TARO))
+
+    def _raise(*_args: object, **_kwargs: object) -> ImportReport:
+        raise ImportInTransactionError("取込の実行は、トランザクションの外で呼んでください")
+
+    monkeypatch.setattr(import_command, "run_import", _raise)
+
+    exit_code = main(["import", "employee", str(csv_path)])
+
+    output = capsys.readouterr().out
+    assert exit_code == 2
+    assert "取込を開始できませんでした" in output
+    assert "以前のバックアップから復元できます" in output
+    assert "トランザクション" not in output
+    assert "例外=ImportInTransactionError" in _log_text(data_dir)
+
+
+def test_revalidation_failure_under_lock_exits_with_1_and_reports_backup(
+    data_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """書き込みのロックの後の再検証で失敗すると、取り込まず終了コード 1。バックアップは残る。"""
+    csv_path = _write_csv(tmp_path, "employee.csv", _csv(_EMPLOYEE_HEADER, _TARO))
+    original = data_import_app._DEFINITIONS[ImportKind.EMPLOYEE]
+
+    def _validate(connection: sqlite3.Connection, content: bytes, today: date) -> ValidatedImport:
+        validated = original.validate(connection, content, today)
+        if not connection.in_transaction:
+            return validated
+        issue = ImportIssue(2, "メールアドレス", ImportErrorCode.DUPLICATE_KEY_IN_DB)
+        return replace(validated, issues=(issue,))
+
+    monkeypatch.setitem(
+        data_import_app._DEFINITIONS,
+        ImportKind.EMPLOYEE,
+        ImportKindDefinition(label="社員", target_table="employee", validate=_validate),
+    )
+
+    exit_code = main(["import", "employee", str(csv_path)])
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    backups = _backups(data_dir)
+    assert len(backups) == 1
+    assert "実行の直前にデータが変わり、エラーになったため、取り込みませんでした" in output
+    assert f"取込前のバックアップ: {backups[0].name}" in output
+    assert "データは変更していません" in output
+    assert "行 2	メールアドレス	E013" in output
+    assert str(data_dir) not in output
+    assert _employee_count(data_dir) == 0
+    assert _operation_count(data_dir) == 0
+
+
+def test_no_header_csv_reports_e002_with_hint(
+    data_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """見出し行がない CSV は、ファイル全体の `E002` だけを出し、直し方を案内する（値なし）。"""
+    csv_path = _write_csv(tmp_path, "employee.csv", _csv(_TARO, _HANAKO))
+
+    exit_code = main(["import", "employee", str(csv_path), "--check"])
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "エラー: 1 件" in output
+    assert f"  行 -	-	E002 {ImportErrorCode.NO_HEADER.description}" in output
+    assert "1行目が見出し行（列名）になっているか" in output
+    assert "山田" not in output
+    assert "taro" not in output
+
+
+def test_format_report_hints_ambiguous_pay_item_column() -> None:
+    """見出し行の `E015`（給与項目の列が決まらない）には、給与項目の見直しを案内する。"""
+    header_issue = ImportIssue(1, "通勤手当", ImportErrorCode.REFERENCE_NOT_RESOLVED)
+    row_issue = ImportIssue(2, "案件名", ImportErrorCode.REFERENCE_NOT_RESOLVED)
+
+    with_header = import_command.format_report(
+        _report(kind=ImportKind.SALARY_HISTORY, issues=(header_issue,)), check_only=True
+    )
+    rows_only = import_command.format_report(
+        _report(kind=ImportKind.RATE_HISTORY, issues=(row_issue,)), check_only=True
+    )
+
+    assert "  行 1	通勤手当	E015" in with_header
+    assert "どの給与項目の列か決まりません" in with_header
+    assert "どの給与項目の列か決まりません" not in rows_only
+    assert "1行目が見出し行" not in rows_only
+
+
+def test_format_report_of_check_with_errors_does_not_mention_backup() -> None:
+    """取込の前の検証のエラー（バックアップを作っていない）は、通常のエラーの結果を出す。"""
+    issue = ImportIssue(2, "入社日", ImportErrorCode.REQUIRED_EMPTY)
+
+    text = import_command.format_report(_report(issues=(issue,)), check_only=False)
+
+    assert "エラーがあるため、取り込みませんでした" in text
+    assert "取込前のバックアップ" not in text

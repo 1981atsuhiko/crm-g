@@ -326,7 +326,7 @@ def test_leaving_the_data_import_page_discards_the_checked_csv(localappdata: Pat
     assert not app.exception
     assert IMPORT_STATE_KEY in app.session_state
     # 取込の結果（ファイルを選び直す前の表示）も、画面を離れたら破棄する。
-    app.session_state[IMPORT_RESULT_KEY] = {"kind": "employee", "report": None}
+    app.session_state[IMPORT_RESULT_KEY] = {"kind": "employee", "report": None, "failure": None}
 
     app.switch_page("views/home.py")
     app = app.run()

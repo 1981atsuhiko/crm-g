@@ -3,6 +3,8 @@
 CSV は試験の中でバイト列として組み立てる。値はすべて架空である。
 """
 
+import sqlite3
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -11,7 +13,15 @@ from streamlit.testing.v1 import AppTest
 
 import crm_g.application.data_import as data_import_app
 from crm_g.application.auth import setup_passcode
-from crm_g.application.data_import import ERROR_DISPLAY_LIMIT, ImportKind, ImportReport
+from crm_g.application.data_import import (
+    ERROR_DISPLAY_LIMIT,
+    ImportInTransactionError,
+    ImportKind,
+    ImportKindDefinition,
+    ImportReport,
+    ValidatedImport,
+)
+from crm_g.application.import_common import ImportErrorCode, ImportIssue
 from crm_g.cli.launcher import main
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.migration import apply_migrations
@@ -435,3 +445,128 @@ def test_tc_mig_048_screen_and_command_give_the_same_result(
     assert _employee_rows(other_db) == screen_rows
     assert _import_logs(other_dir) == _import_logs(data_dir)
     assert len(_import_logs(data_dir)) == 1
+
+
+def test_backup_failure_shows_general_message_without_path(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取込前のバックアップを作れないときは、取り込まず、パスを出さずに案内する（`MIG-053`）。"""
+
+    def _fail_copy(_source: Path, destination: Path) -> None:
+        destination.write_bytes(b"partial")
+        raise OSError(f"書き込めません: {destination}")
+
+    app = _check(_upload(_new_app(), _EMPLOYEE_CSV))
+    monkeypatch.setattr("crm_g.infrastructure.backup._copy_database", _fail_copy)
+    app = _execute(app)
+
+    assert not app.exception
+    texts = _texts(app)
+    assert "取込前のバックアップを作成できなかったため、取り込みませんでした" in texts
+    assert "以前のバックアップから復元できます" in texts
+    assert "crm-g_" not in texts
+    assert str(data_dir) not in texts
+    assert UNEXPECTED_ERROR_MESSAGE not in texts
+    assert _count(data_dir, "employee") == 0
+    assert _backups(data_dir) == []
+    assert _import_logs(data_dir) == []
+    assert app.session_state[IMPORT_RESULT_KEY]["failure"] == "backup"
+
+
+def test_in_transaction_error_shows_general_message(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取込を始める前に止まったとき（`ImportInTransactionError`）は、一般的なメッセージを出す。"""
+
+    def _raise(*_args: object, **_kwargs: object) -> ImportReport:
+        raise ImportInTransactionError("取込の実行は、トランザクションの外で呼んでください")
+
+    app = _check(_upload(_new_app(), _EMPLOYEE_CSV))
+    monkeypatch.setattr(data_import_app, "run_import", _raise)
+    app = _execute(app)
+
+    assert not app.exception
+    texts = _texts(app)
+    assert UNEXPECTED_ERROR_MESSAGE in texts
+    assert "以前のバックアップから復元できます" in texts
+    assert "トランザクション" not in texts
+    assert _count(data_dir, "employee") == 0
+
+
+def test_revalidation_failure_under_lock_keeps_backup_and_imports_nothing(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """書き込みのロックの後の再検証で失敗すると、取り込まず、取込前のバックアップの名前を示す。"""
+    original = data_import_app._DEFINITIONS[ImportKind.EMPLOYEE]
+
+    def _validate(connection: sqlite3.Connection, content: bytes, today: date) -> ValidatedImport:
+        validated = original.validate(connection, content, today)
+        if not connection.in_transaction:
+            return validated
+        # ロックの後で読み直すと、ほかのタブが同じ社員を登録していた状態にする。
+        issue = ImportIssue(2, "メールアドレス", ImportErrorCode.DUPLICATE_KEY_IN_DB)
+        return replace(validated, issues=(issue,))
+
+    monkeypatch.setitem(
+        data_import_app._DEFINITIONS,
+        ImportKind.EMPLOYEE,
+        ImportKindDefinition(label="社員", target_table="employee", validate=_validate),
+    )
+    app = _execute(_check(_upload(_new_app(), _EMPLOYEE_CSV)))
+
+    assert not app.exception
+    texts = _texts(app)
+    assert "確認の後にデータが変わったため、取り込みませんでした" in texts
+    assert "取込前のバックアップは作成しましたが、データは変更していません" in texts
+    backups = _backups(data_dir)
+    assert len(backups) == 1
+    assert backups[0].name in texts
+    assert str(data_dir) not in texts
+    assert "E013" in str(_table(app, "行番号"))
+    assert _count(data_dir, "employee") == 0
+    assert _import_logs(data_dir) == []
+
+
+def test_no_header_error_shows_hint(data_dir: Path) -> None:
+    """見出し行がない（どの列にも一致しない）ときは、ファイル全体の `E002` と直し方を出す。"""
+    app = _check(_upload(_new_app(), _csv(_TARO, _HANAKO)))
+
+    assert not app.exception
+    issues = _table(app, "行番号")
+    assert issues == [
+        {
+            "行番号": "－",
+            "項目": "－",
+            "原因": ImportErrorCode.NO_HEADER.value + " " + ImportErrorCode.NO_HEADER.description,
+        }
+    ]
+    texts = _texts(app)
+    assert "1行目が見出し行（列名）になっているか" in texts
+    assert "山田" not in texts
+    assert "taro" not in texts
+
+
+def test_ambiguous_pay_item_column_shows_hint(data_dir: Path) -> None:
+    """給与項目の列が1件に決まらないときは、見出し行の `E015` と、給与項目の見直しを案内する。"""
+    with open_connection(data_dir / "crm-g.db") as connection:
+        for code in ("COMMUTE_A", "COMMUTE_B"):
+            connection.execute(
+                "INSERT INTO pay_item (code, name, category, in_monthly_salary, cost_direct, "
+                "sort_order, valid_from, created_at, updated_at) "
+                "VALUES (?, '通勤手当', '固定支給', 1, 0, 99, '2020-04-01', ?, ?)",
+                (code, "2026-10-27T00:00:00.000000Z", "2026-10-27T00:00:00.000000Z"),
+            )
+        connection.commit()
+    content = _csv(
+        f"{_SALARY_HEADER},通勤手当", "山田 太郎,2025/04/01,通常評価制度,正社員,入社,1,2"
+    )
+    app = _check(_upload(_select_kind(_new_app(), ImportKind.SALARY_HISTORY), content))
+
+    assert not app.exception
+    issues = _table(app, "行番号")
+    assert {
+        "行番号": "1",
+        "項目": "通勤手当",
+        "原因": "E015 " + ImportErrorCode.REFERENCE_NOT_RESOLVED.description,
+    } in issues
+    assert "どの給与項目の列か決まりません" in _texts(app)
