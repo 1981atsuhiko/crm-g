@@ -12,7 +12,7 @@
 """
 
 import sqlite3  # noqa: TID251 呼び出し側が開いた接続の型として使うだけで、接続はインフラ層に閉じ込める
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -23,14 +23,20 @@ from crm_g.application.import_common import (
     ImportIssue,
     ImportRow,
     InvalidCellError,
-    issue_for_cell,
-    match_choice,
     normalize_cell,
-    normalize_free_text,
     parse_date,
     parse_email,
     read_import_csv,
     require_value,
+)
+from crm_g.application.import_rows import (
+    RowReader,
+    choice,
+    code_text,
+    free_text,
+    key_issues,
+    required_choice,
+    required_free_text,
 )
 from crm_g.infrastructure.datetime_utils import to_iso8601, utc_now
 
@@ -106,64 +112,16 @@ class EmployeeValidation:
     records: tuple[EmployeeRecord, ...]
 
 
-class _RowReader:
-    """1行のセルを列ごとに解釈し、解釈できなかったセルのエラーを集める。"""
-
-    def __init__(self, row: ImportRow) -> None:
-        """解釈する行を保持する。"""
-        self._row = row
-        self.issues: list[ImportIssue] = []
-
-    def read[T](self, column: str, parse: Callable[[str | None], T]) -> T | None:
-        """列のセル（列がなければ `None`）を `parse` で解釈する。エラーなら記録して `None`。"""
-        try:
-            return parse(self._row.values.get(column))
-        except InvalidCellError as error:
-            self.issues.append(issue_for_cell(self._row.line_number, column, error))
-            return None
-
-    def add(self, column: str, code: ImportErrorCode) -> None:
-        """セルの解釈以外のエラー（項目の組み合わせなど）を記録する。"""
-        self.issues.append(ImportIssue(self._row.line_number, column, code))
-
-
-def _free_text(raw: str | None) -> str | None:
-    """自由記述のセル（前後の空白の除去だけ。`MIG-022`）。"""
-    return None if raw is None else normalize_free_text(raw)
-
-
-def _required_free_text(raw: str | None) -> str:
-    """必須の自由記述のセル。空は `E006`。"""
-    return require_value(_free_text(raw))
-
-
-def _code_text(raw: str | None) -> str | None:
-    """区分値・コードのセル（NFKC 正規化と前後の空白の除去。`MIG-022`）。"""
-    return None if raw is None else normalize_cell(raw)
-
-
 def _email(raw: str | None) -> str:
     """メールアドレスのセル。必須で、`@` を1つ含み空白を含まない。小文字にする（`MIG-040`）。"""
-    return parse_email(require_value(_code_text(raw)))
-
-
-def _choice(choices: Mapping[str, str], *, required: bool) -> Callable[[str | None], str | None]:
-    """区分値のセルを、選択肢と照合する解釈の関数を作る（`E008`）。"""
-
-    def parse(raw: str | None) -> str | None:
-        text = _code_text(raw)
-        if text is None:
-            return require_value(text) if required else None
-        return match_choice(text, choices)
-
-    return parse
+    return parse_email(require_value(code_text(raw)))
 
 
 def _date(*, required: bool, latest: date | None = None) -> Callable[[str | None], date | None]:
     """日付のセルを解釈する関数を作る（`E007`。`latest` より後は `E009`）。"""
 
     def parse(raw: str | None) -> date | None:
-        text = _code_text(raw)
+        text = code_text(raw)
         if text is None:
             return require_value(text) if required else None
         return parse_date(text, latest=latest)
@@ -173,25 +131,23 @@ def _date(*, required: bool, latest: date | None = None) -> Callable[[str | None
 
 def _parse_row(row: ImportRow, today: date) -> tuple[EmployeeRecord | None, list[ImportIssue]]:
     """1行を解釈・検証する（行ごとの検証）。エラーがなければ、取り込む社員を返す。"""
-    reader = _RowReader(row)
+    reader = RowReader(row)
     email = reader.read(EMAIL_COLUMN, _email)
-    employee_no = reader.read(EMPLOYEE_NO_COLUMN, _code_text)
-    name = reader.read(NAME_COLUMN, _required_free_text)
-    name_kana = reader.read(NAME_KANA_COLUMN, _free_text)
-    employment_type = reader.read(
-        EMPLOYMENT_TYPE_COLUMN, _choice(_EMPLOYMENT_TYPE_CHOICES, required=False)
-    )
+    employee_no = reader.read(EMPLOYEE_NO_COLUMN, code_text)
+    name = reader.read(NAME_COLUMN, required_free_text)
+    name_kana = reader.read(NAME_KANA_COLUMN, free_text)
+    employment_type = reader.read(EMPLOYMENT_TYPE_COLUMN, choice(_EMPLOYMENT_TYPE_CHOICES))
     # 生年月日が今日以降は、範囲の誤り（E009）。画面（SCN-022「今日より前」）に合わせる。
     birth_date = reader.read(
         BIRTH_DATE_COLUMN, _date(required=False, latest=today - timedelta(days=1))
     )
-    gender = reader.read(GENDER_COLUMN, _choice(_GENDER_CHOICES, required=False))
+    gender = reader.read(GENDER_COLUMN, choice(_GENDER_CHOICES))
     join_date = reader.read(JOIN_DATE_COLUMN, _date(required=True))
-    nearest_station = reader.read(NEAREST_STATION_COLUMN, _free_text)
-    residence_area = reader.read(RESIDENCE_AREA_COLUMN, _free_text)
-    job_type = reader.read(JOB_TYPE_COLUMN, _free_text)
+    nearest_station = reader.read(NEAREST_STATION_COLUMN, free_text)
+    residence_area = reader.read(RESIDENCE_AREA_COLUMN, free_text)
+    job_type = reader.read(JOB_TYPE_COLUMN, free_text)
     enrollment_status = reader.read(
-        ENROLLMENT_STATUS_COLUMN, _choice(_ENROLLMENT_STATUS_CHOICES, required=True)
+        ENROLLMENT_STATUS_COLUMN, required_choice(_ENROLLMENT_STATUS_CHOICES)
     )
     retire_date = reader.read(RETIRE_DATE_COLUMN, _date(required=False))
     if retire_date is not None and join_date is not None and retire_date < join_date:
@@ -231,7 +187,7 @@ def _key_values(
     """重複の検査に使うキー（行番号と、解釈した値）を集める。解釈できない・空の行は除く。"""
     keys: list[tuple[int, str]] = []
     for row in rows:
-        text = _code_text(row.values.get(column))
+        text = code_text(row.values.get(column))
         if text is None:
             continue
         try:
@@ -246,15 +202,11 @@ def _duplicate_issues(
     keys: Iterable[tuple[int, str]], column: str, existing: frozenset[str]
 ) -> list[ImportIssue]:
     """ファイル内の重複（2回目以降の行を `E012`）と、DB との重複（`E013`）を検査する。"""
-    issues: list[ImportIssue] = []
-    seen: set[str] = set()
-    for line_number, key in keys:
-        if key in existing:
-            issues.append(ImportIssue(line_number, column, ImportErrorCode.DUPLICATE_KEY_IN_DB))
-        elif key in seen:
-            issues.append(ImportIssue(line_number, column, ImportErrorCode.DUPLICATE_KEY_IN_FILE))
-        seen.add(key)
-    return issues
+
+    def db_issue(key: str) -> ImportErrorCode | None:
+        return ImportErrorCode.DUPLICATE_KEY_IN_DB if key in existing else None
+
+    return key_issues(keys, column, db_issue)
 
 
 def _normalized_keys(values: Iterable[object]) -> frozenset[str]:
