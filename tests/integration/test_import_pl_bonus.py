@@ -508,6 +508,33 @@ def test_bonus_paid_after_this_month_is_not_recalculated(
     assert _pl_rows(connection) == []
 
 
+def test_bonus_paid_in_a_closed_month_is_not_recalculated(
+    connection: sqlite3.Connection, db_path: Path
+) -> None:
+    """支給月が締め済みの月なら、取り込むが、計算せず `closed_months` に入れる（`MIG-054`）。
+
+    締め済みの月の計算結果（賞与の原価 0）は、変わらない。鈴木花子は給与履歴がなく、計算エラーの
+    まま締める。
+    """
+    _prepare_october_calculation(connection)
+    recalculate_month(connection, "2026-10")
+    connection.commit()
+    close_month(connection, "2026-10", acknowledge_errors=True)
+    before = _pl_rows(connection)
+    content = _csv(_BONUS_HEADER, "山田 太郎,,2026-H1,2026-10,基本給,250000,375000")
+
+    report = _run(connection, db_path, _BONUS_KIND, content)
+
+    assert report.executed is True
+    assert report.recalculation is not None
+    assert report.recalculation.year_months == ()
+    assert report.recalculation.closed_months == ("2026-10",)
+    assert report.recalculated_month_count == 0
+    assert [row[:3] for row in _bonus_rows(connection)] == [(_TARO_ID, "2026-H1", "2026-10")]
+    assert _pl_rows(connection) == before
+    assert [row[6] for row in before] == [0]
+
+
 def test_tc_mig_037_pay_month_must_match_the_half(
     connection: sqlite3.Connection, db_path: Path
 ) -> None:

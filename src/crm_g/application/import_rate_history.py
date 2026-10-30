@@ -4,10 +4,14 @@
 
 - 単価は、必ず参画に紐づける（`DBD-018`）。顧客名が空の行は `E006`。顧客名なしで
   案件名がある行は `E016`
-- 参画は、その社員の DB の参画から、顧客名（案件名があるときは案件名も）が正規化名
-  （`MIG-030`）で一致するものを探す。1件に決まらないとき（なし・複数）は `E015`。
-  `IMP-03` の取り込みの後に探せる
-- 適用開始日が、参画の開始日〜終了日の外にあるときは `E016`
+- 参画は、その社員の DB の参画から、顧客名・案件名が正規化名（`MIG-030`）で一致する
+  ものを候補とする。案件名は完全に照合し、案件名が空の行は、案件名が空の参画とだけ一致する
+  （`IMP-03` の `MGD-004` と同じ考え方）。`IMP-03` の取り込みの後に探せる
+- 候補がないときは `E015`。候補が1件で、適用開始日が参画の開始日〜終了日（空は継続中）の
+  外にあるときは `E016`
+- 候補が複数のときは、適用開始日が参画の期間の中にあるものに絞る。1件に決まれば紐づける。
+  期間の中のものがないときは `E016`、期間が重なり複数残るとき（適用開始日が正しくないときを
+  含む）は `E015`
 - 一意の組（参画、適用開始日）が、CSV 内で重複すると `E012`、DB に既にあると `E013`
 - 投入は、既存の `register_rate_history` を使わない。1行ごとに操作ログ・再計算を行い、
   例外のメッセージに値を含むため。操作ログ・再計算・トランザクションは、呼び出し側
@@ -144,22 +148,41 @@ def _assignments_by_employee(
 def _find_assignment(
     reader: RowReader,
     candidates: Sequence[_Assignment],
-    customer_name: str,
-    project_name: str | None,
+    names: tuple[str, str | None],
+    effective_from: date | None,
 ) -> _Assignment | None:
-    """顧客名（案件名があるときは案件名も）が一致する参画を探す。1件に決まらなければ `E015`。"""
+    """顧客名・案件名と、適用開始日から、参画を1件に決める。決まらなければ `E015`・`E016`。
+
+    `names` は（顧客名、案件名）。案件名が空の行は、案件名が空の参画とだけ一致する。
+    候補が1件のときは、期間の外でも返す（ファイル内・DB との重複の検査に使うため）。
+    """
+    customer_name, project_name = names
     customer_key = normalized_name(customer_name)
-    project_key = normalized_name(project_name) if project_name else None
+    project_key = normalized_name(project_name) if project_name else ""
     found = [
         assignment
         for assignment in candidates
-        if assignment.customer_key == customer_key
-        and (project_key is None or assignment.project_key == project_key)
+        if assignment.customer_key == customer_key and assignment.project_key == project_key
     ]
-    if len(found) != 1:
+    if not found:
         reader.add(CUSTOMER_NAME_COLUMN, ImportErrorCode.REFERENCE_NOT_RESOLVED)
         return None
-    return found[0]
+    if len(found) == 1:
+        if effective_from is not None and not _within(effective_from, found[0]):
+            reader.add(EFFECTIVE_FROM_COLUMN, ImportErrorCode.INVALID_COMBINATION)
+        return found[0]
+    # 同じ顧客名・案件名の参画が複数あるときは、適用開始日を含む期間の参画に絞る。
+    if effective_from is None:
+        reader.add(CUSTOMER_NAME_COLUMN, ImportErrorCode.REFERENCE_NOT_RESOLVED)
+        return None
+    within = [assignment for assignment in found if _within(effective_from, assignment)]
+    if not within:
+        reader.add(EFFECTIVE_FROM_COLUMN, ImportErrorCode.INVALID_COMBINATION)
+        return None
+    if len(within) != 1:
+        reader.add(CUSTOMER_NAME_COLUMN, ImportErrorCode.REFERENCE_NOT_RESOLVED)
+        return None
+    return within[0]
 
 
 def _parse_row(
@@ -181,14 +204,11 @@ def _parse_row(
     assignment: _Assignment | None = None
     if match.employee_id is not None and customer_name is not None:
         assignment = _find_assignment(
-            reader, assignments.get(match.employee_id, ()), customer_name, project_name
+            reader,
+            assignments.get(match.employee_id, ()),
+            (customer_name, project_name),
+            effective_from,
         )
-    if (
-        assignment is not None
-        and effective_from is not None
-        and not _within(effective_from, assignment)
-    ):
-        reader.add(EFFECTIVE_FROM_COLUMN, ImportErrorCode.INVALID_COMBINATION)
 
     record: RateHistoryRecord | None = None
     # 必須の列は、エラーがなければ必ず値がある（None の判定は、型を絞るため）。

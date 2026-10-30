@@ -301,6 +301,29 @@ def test_tc_mig_022_all_pay_items_empty_is_e006(connection: sqlite3.Connection) 
     assert _issues(no_item_columns) == [(2, "給与項目の列", "E006")]
 
 
+def test_csv_without_pay_item_columns_is_e006_on_every_row(
+    connection: sqlite3.Connection, db_path: Path
+) -> None:
+    """見出しに給与項目の列が1つもない CSV は、見出し行のエラーにせず、全行を `E006` にする。
+
+    除外列（`支払額`）は、給与項目の列に数えない。1行も取り込まない。
+    """
+    report = _run(
+        connection,
+        db_path,
+        _csv(
+            "山田 太郎,2025/04/01,通常評価制度,正社員,入社,300000",
+            "鈴木 花子,2025/04/01,通常評価制度,正社員,入社,300000",
+            header="氏名,適用開始日,給与体系,雇用形態,改定区分,支払額",
+        ),
+    )
+
+    assert report.executed is False
+    assert report.excluded_columns == ("支払額",)
+    assert _issues(report) == [(2, "給与項目の列", "E006"), (3, "給与項目の列", "E006")]
+    assert _histories(connection) == []
+
+
 @pytest.mark.parametrize(
     ("line", "expected"),
     [

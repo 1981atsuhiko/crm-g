@@ -124,7 +124,7 @@ def test_run_import_inserts_rate_histories(connection: sqlite3.Connection, db_pa
         db_path,
         _csv(
             '山田 太郎,2025/06/01,"700,000",サンプル 商事,基幹システム開発,入場時の契約, 備考 ',
-            "山田 太郎,2026/04/01,750000,サンプル商事,,単価改定,",
+            "山田 太郎,2026/04/01,750000,サンプル商事,基幹システム開発,単価改定,",
             "鈴木 花子,2026/9/30,0,テスト工業,,,",
         ),
     )
@@ -163,9 +163,10 @@ def test_work_period_then_rate_history(connection: sqlite3.Connection, db_path: 
 def test_tc_mig_030_ambiguous_or_missing_assignment_is_e015(
     connection: sqlite3.Connection,
 ) -> None:
-    """`TC-MIG-030`：顧客名が一致する参画が複数あると `E015`。案件名で1件に決まれば紐づく。
+    """`TC-MIG-030`：顧客名・案件名が一致する参画がないと `E015`。案件名で1件に決まれば紐づく。
 
-    一致する参画がない（他の社員の参画は探さない）ときも `E015`。
+    案件名が空の行は、案件名が空の参画とだけ一致する（案件名のある参画には紐づけない）。
+    他の社員の参画は探さない。
     """
     _insert_assignment(connection, _TARO, ("サンプル商事", "基幹"), ("2025-04-01", None))
     _insert_assignment(connection, _TARO, ("サンプル商事", "保守"), ("2025-04-01", None))
@@ -181,6 +182,103 @@ def test_tc_mig_030_ambiguous_or_missing_assignment_is_e015(
         (2, "顧客名", "E015"),
         (4, "顧客名", "E015"),
         (5, "顧客名", "E015"),
+    ]
+
+
+def test_work_period_with_and_without_project_name(
+    connection: sqlite3.Connection, db_path: Path
+) -> None:
+    """`IMP-03` で作った案件名なし・ありの同じ顧客の参画に、案件名の有無で紐づく（`MGD-004`）。"""
+    work = _run(
+        connection,
+        db_path,
+        _csv(
+            "山田 太郎,2025/04/01,2025/05/31,現場稼働,サンプル商事,,SES,,",
+            "山田 太郎,2025/06/01,,現場稼働,サンプル商事,基幹,SES,,",
+            header="氏名,開始日,終了日,稼働状態,顧客名,案件名,区分,稼働率,備考",
+        ),
+        ImportKind.WORK_PERIOD,
+    )
+    assignments = dict(
+        connection.execute(
+            "SELECT COALESCE(project_name, ''), id FROM assignment WHERE employee_id = ?",
+            (_TARO,),
+        ).fetchall()
+    )
+    rate = _run(
+        connection,
+        db_path,
+        _csv(
+            "山田 太郎,2025/04/01,600000,サンプル商事,,,",
+            "山田 太郎,2025/06/01,700000,サンプル商事,基幹,,",
+        ),
+    )
+
+    assert work.executed
+    assert rate.executed
+    assert [row[1:4] for row in _rates(connection)] == [
+        (assignments[""], "2025-04-01", 600000),
+        (assignments["基幹"], "2025-06-01", 700000),
+    ]
+
+
+def test_same_names_are_chosen_by_effective_from(
+    connection: sqlite3.Connection, db_path: Path
+) -> None:
+    """同じ顧客名・案件名で期間が別の参画は、適用開始日を含む期間の参画に紐づく。"""
+    first = _insert_assignment(
+        connection, _TARO, ("サンプル商事", "保守"), ("2025-04-01", "2025-09-30")
+    )
+    second = _insert_assignment(connection, _TARO, ("サンプル商事", "保守"), ("2026-04-01", None))
+
+    report = _run(
+        connection,
+        db_path,
+        _csv(
+            "山田 太郎,2025/09/30,600000,サンプル商事,保守,,",
+            "山田 太郎,2026/04/01,700000,サンプル商事,保守,,",
+        ),
+    )
+
+    assert report.executed
+    assert [row[1:4] for row in _rates(connection)] == [
+        (first, "2025-09-30", 600000),
+        (second, "2026-04-01", 700000),
+    ]
+
+
+def test_same_names_outside_every_period_is_e016(connection: sqlite3.Connection) -> None:
+    """同じ顧客名・案件名の参画が複数あり、どの期間にも適用開始日が入らないときは `E016`。"""
+    _insert_assignment(connection, _TARO, ("サンプル商事", "保守"), ("2025-04-01", "2025-09-30"))
+    _insert_assignment(connection, _TARO, ("サンプル商事", "保守"), ("2026-04-01", None))
+
+    assert _check(
+        connection,
+        "山田 太郎,2025/03/31,1,サンプル商事,保守,,",
+        "山田 太郎,2025/12/01,1,サンプル商事,保守,,",
+    ) == [
+        (2, "適用開始日", "E016"),
+        (3, "適用開始日", "E016"),
+    ]
+
+
+def test_overlapping_same_names_is_e015(connection: sqlite3.Connection) -> None:
+    """同じ顧客名・案件名の参画の期間が重なり、1件に決まらないときは `E015`。
+
+    重ならない日は、その日を含む参画に紐づく。適用開始日が正しくないときも `E015` を出す。
+    """
+    _insert_assignment(connection, _TARO, ("テスト工業", None), ("2025-04-01", None))
+    _insert_assignment(connection, _TARO, ("テスト工業", None), ("2025-06-01", "2025-12-31"))
+
+    assert _check(
+        connection,
+        "山田 太郎,2025/07/01,1,テスト工業,,,",
+        "山田 太郎,2025/05/01,1,テスト工業,,,",
+        "山田 太郎,2025/02/30,1,テスト工業,,,",
+    ) == [
+        (2, "顧客名", "E015"),
+        (4, "適用開始日", "E007"),
+        (4, "顧客名", "E015"),
     ]
 
 
