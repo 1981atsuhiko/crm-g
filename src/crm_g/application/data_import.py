@@ -9,7 +9,12 @@
   （DB を読み直す）→ 投入 → 再計算（`MIG-054`）→ 操作ログ `取込` を1件（`MIG-055`）→
   コミット。ロックの後にバックアップを作るため、バックアップと投入の間に、ほかのタブの
   更新は入らない。エラーが1件でもあれば何も投入しない（`MIG-002`）。例外はロールバックして
-  再送出する（`MIG-052`）。トランザクションの中からは呼べない
+  再送出する（`MIG-052`）。取込前のバックアップを作った後の例外は、`ImportRolledBackError`
+  （元の例外を `__cause__` に持つ）にして送出する。トランザクションの中からは呼べない
+
+2つのユースケースの中の例外は、ここで例外の型名だけをログ（ERROR）に出してから送出する
+（値・パスは出さない。`MIG-056`）。呼び出し側（画面・移行コマンド）は、同じ例外を重ねて
+ログに出さない。
 
 取込の種類ごとの処理は、`_DEFINITIONS` の登録表で差し替える。種類を足すときは、
 `ImportKind` に識別子を足し、検証の関数（`ImportValidator`）を書いて登録表に加える。
@@ -365,7 +370,7 @@ def check_import(
 
     `today` は今日の日付（生年月日の未来の判定などに使う）。
     """
-    validated = _DEFINITIONS[kind].validate(connection, content, today)
+    validated = _validate_logged(connection, kind, content, today)
     _logger.info(
         "取込の確認をしました（種類=%s 行数=%d エラー=%d）",
         kind.value,
@@ -375,12 +380,42 @@ def check_import(
     return _report(kind, validated)
 
 
+def _validate_logged(
+    connection: sqlite3.Connection, kind: ImportKind, content: bytes, today: date
+) -> ValidatedImport:
+    """トランザクションの前の、読み込み・名寄せ・整形・検証。
+
+    例外は、型名だけをログに出してから再送出する（例外のメッセージは値を含みうる。`MIG-056`）。
+    """
+    try:
+        return _DEFINITIONS[kind].validate(connection, content, today)
+    except Exception as error:
+        _logger.error(
+            "取込の検証の途中で失敗しました（種類=%s 例外=%s）", kind.value, type(error).__name__
+        )
+        raise
+
+
 class ImportInTransactionError(RuntimeError):
     """取込の実行を、呼び出し側のトランザクションの中で呼んだときのエラー。
 
     取込の実行は、自分でトランザクションを開始・コミット・ロールバックするため、外側の
     トランザクションに参加させない（参加すると、失敗してもロールバックされない）。
     """
+
+
+class ImportRolledBackError(RuntimeError):
+    """取込前のバックアップを作った後の例外で、ロールバックしたときのエラー（`MIG-052`）。
+
+    データは変更していない。`backup_path` は、作成した取込前のバックアップ。元の例外は
+    `__cause__` に持つ。呼び出し側は、取込前のバックアップのファイル名と、そこからの復元を
+    案内できる。
+    """
+
+    def __init__(self, backup_path: Path) -> None:
+        """作成した取込前のバックアップのパスを保持する。"""
+        super().__init__("取込に失敗し、ロールバックしました")
+        self.backup_path = backup_path
 
 
 class _ValidationFailedError(Exception):
@@ -420,12 +455,19 @@ def run_import(  # noqa: PLR0913 取込前のバックアップの作成先（MI
     検証を通ったら、`BEGIN IMMEDIATE` で書き込みのロックを取ってから、取込前のバックアップを
     作る。バックアップを作れないときは、ロールバックして `BackupWriteError` を送出し、取り込まない
     （作りかけのファイルは消す）。投入・再計算・操作ログの途中の例外は、ロールバックしてから
-    再送出する（`MIG-052`）。`connection` がトランザクションの中なら `ImportInTransactionError`。
+    再送出する（`MIG-052`）。取込前のバックアップを作った後の例外は、`ImportRolledBackError`
+    にして送出する。`connection` がトランザクションの中なら `ImportInTransactionError`。
+    どの例外も、型名だけをログに出してから送出する（`MIG-056`）。
     """
     if connection.in_transaction:
+        _logger.error(
+            "取込を開始できませんでした（種類=%s 例外=%s）",
+            kind.value,
+            ImportInTransactionError.__name__,
+        )
         raise ImportInTransactionError("取込の実行は、トランザクションの外で呼んでください")
     definition = _DEFINITIONS[kind]
-    validated = definition.validate(connection, content, today)
+    validated = _validate_logged(connection, kind, content, today)
     if validated.issues:
         _log_rejected(kind, validated)
         return _report(kind, validated)
@@ -469,6 +511,8 @@ def run_import(  # noqa: PLR0913 取込前のバックアップの作成先（MI
             kind.value,
             type(error).__name__,
         )
+        if backup_path is not None:
+            raise ImportRolledBackError(backup_path) from error
         raise
 
     _logger.info(

@@ -1,8 +1,12 @@
 """起動用のエントリポイント（`ARC-014`）。
 
-多重起動の防止・DBのマイグレーション適用・固定ポートの空き確認を行ってから、
-`streamlit.web.bootstrap` でStreamlitを起動し、標準ライブラリ `webbrowser` で
-ブラウザを開く（実装計画書 4.5。`POC-08` で実証済みの方式）。
+引数がなければ、画面を起動する（`serve`）。多重起動の防止・DBのマイグレーション適用・
+固定ポートの空き確認を行ってから、`streamlit.web.bootstrap` でStreamlitを起動し、
+標準ライブラリ `webbrowser` でブラウザを開く（実装計画書 4.5。`POC-08` で実証済みの方式）。
+
+`crm-g import ...` は、移行コマンド（移行設計書 `MIG-070`。`crm_g.cli.import_command`）に
+振り分ける。移行コマンドは Streamlit を使わないため、`streamlit` の import は `serve` の
+中だけで行う（移行コマンドの起動を軽くし、cli が streamlit に依存しないため。`ARC-002`）。
 """
 
 import logging
@@ -11,19 +15,27 @@ import sys
 import threading
 import time
 import webbrowser
+from collections.abc import Sequence
 from pathlib import Path
 
-from streamlit.web import bootstrap  # noqa: TID251 起動用launcherだけの例外（ARC-014。POC-08で実証済み）
-
+from crm_g.cli.import_command import IMPORT_COMMAND, run_import_command
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.logging_setup import setup_logging
 from crm_g.infrastructure.migration import BUNDLED_DDL_DIR, apply_migrations
 from crm_g.infrastructure.paths import get_app_paths
-from crm_g.infrastructure.single_instance import AlreadyRunningError, acquire_lock
+from crm_g.infrastructure.single_instance import (
+    LOCK_FILE_NAME,
+    AlreadyRunningError,
+    acquire_lock,
+)
 
 _HOST = "127.0.0.1"
 _PORT = 8501
-_LOCK_FILE_NAME = "crm-g.lock"
+_USAGE = (
+    "使い方:\n"
+    "  crm-g                                              画面を起動します\n"
+    "  crm-g import <取込の種類> <CSV のパス> [--check]   データを取り込みます"
+)
 
 _UI_APP_PATH = Path(__file__).resolve().parent.parent / "ui" / "app.py"
 
@@ -99,7 +111,7 @@ def serve() -> int:
     setup_logging(paths.log_dir)
 
     try:
-        with acquire_lock(paths.data_dir / _LOCK_FILE_NAME):
+        with acquire_lock(paths.data_dir / LOCK_FILE_NAME):
             if not _is_port_available(_HOST, _PORT):
                 print(
                     f"ポート {_PORT} は使用中です。他のアプリを終了してから、やり直してください。"
@@ -108,6 +120,9 @@ def serve() -> int:
 
             with open_connection(paths.db_path) as connection:
                 apply_migrations(connection, BUNDLED_DDL_DIR, paths.db_path, paths.backup_dir)
+
+            # 移行コマンドで streamlit を読み込まないよう、画面の起動のときだけ import する。
+            from streamlit.web import bootstrap  # noqa: PLC0415, TID251 起動用launcherだけの例外（ARC-014。POC-08で実証済み）
 
             flag_options = _build_flag_options()
             bootstrap.load_config_options(flag_options=flag_options)
@@ -126,8 +141,21 @@ def serve() -> int:
         return 1
 
 
-def main() -> int:
-    return serve()
+def main(argv: Sequence[str] | None = None) -> int:
+    """引数で、画面の起動と移行コマンドを振り分ける。終了コードを返す。
+
+    `argv` はプログラム名を除いた引数で、`None` のときは `sys.argv` から取る。
+    """
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if not arguments:
+        return serve()
+    if arguments[0] == IMPORT_COMMAND:
+        return run_import_command(arguments[1:])
+    if arguments[0] in ("-h", "--help"):
+        print(_USAGE)
+        return 0
+    print(_USAGE, file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

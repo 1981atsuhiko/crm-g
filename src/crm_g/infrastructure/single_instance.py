@@ -14,6 +14,9 @@ from pathlib import Path
 
 from crm_g.infrastructure.paths import UnsupportedPlatformError
 
+LOCK_FILE_NAME = "crm-g.lock"
+"""データ領域のロックファイルの名前。アプリの起動と移行コマンドが、同じロックを取る（`MIG-070`）。"""
+
 
 class AlreadyRunningError(RuntimeError):
     """既に起動しているため、ロックを取得できなかったときのエラー。"""

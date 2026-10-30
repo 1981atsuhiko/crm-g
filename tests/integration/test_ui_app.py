@@ -9,7 +9,12 @@ from streamlit.testing.v1 import AppTest
 from crm_g.application.auth import change_passcode, setup_passcode
 from crm_g.infrastructure.db import open_connection
 from crm_g.infrastructure.migration import apply_migrations
-from crm_g.ui.session import AUTHENTICATED_KEY, EXPORT_STATE_KEY
+from crm_g.ui.session import (
+    AUTHENTICATED_KEY,
+    EXPORT_STATE_KEY,
+    IMPORT_RESULT_KEY,
+    IMPORT_STATE_KEY,
+)
 
 _APP_PATH = Path(__file__).resolve().parents[2] / "src" / "crm_g" / "ui" / "app.py"
 _DDL_DIR = Path(__file__).resolve().parents[2] / "DDL"
@@ -282,3 +287,50 @@ def test_restore_logs_out_and_shows_login(localappdata: Path) -> None:
 
     assert not app.exception
     assert _titles(app) == ["ログイン"]
+
+
+def test_authenticated_session_can_open_data_import(localappdata: Path) -> None:
+    db_path = localappdata / "crm-g" / "crm-g.db"
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+
+    app = AppTest.from_file(str(_APP_PATH), default_timeout=_APPTEST_TIMEOUT_SECONDS)
+    app.session_state[AUTHENTICATED_KEY] = True
+    app = app.run()
+    app.switch_page("views/data_import.py")
+    app.run()
+
+    assert _titles(app) == ["データ取込"]
+    assert not app.exception
+
+
+def test_leaving_the_data_import_page_discards_the_checked_csv(localappdata: Path) -> None:
+    """データ取込画面を離れたら、確認した CSV と取込の結果を破棄する（画面設計書 3.2）。"""
+    db_path = localappdata / "crm-g" / "crm-g.db"
+    with open_connection(db_path) as connection:
+        setup_passcode(connection, _PASSCODE, _PASSCODE)
+    content = (
+        "メールアドレス,氏名,入社日,在籍ステータス\r\n"
+        "taro.yamada@example.com,山田 太郎,2020/04/01,在籍\r\n"
+    ).encode()
+
+    app = AppTest.from_file(str(_APP_PATH), default_timeout=_APPTEST_TIMEOUT_SECONDS)
+    app.session_state[AUTHENTICATED_KEY] = True
+    app = app.run()
+    app.switch_page("views/data_import.py")
+    app = app.run()
+    app.file_uploader[0].set_value(("社員.csv", content, "text/csv"))
+    app = app.run()
+    app.button(key="import_check").click()
+    app = app.run()
+    assert not app.exception
+    assert IMPORT_STATE_KEY in app.session_state
+    # 取込の結果（ファイルを選び直す前の表示）も、画面を離れたら破棄する。
+    app.session_state[IMPORT_RESULT_KEY] = {"kind": "employee", "report": None, "failure": None}
+
+    app.switch_page("views/home.py")
+    app = app.run()
+
+    assert not app.exception
+    assert IMPORT_STATE_KEY not in app.session_state
+    assert IMPORT_RESULT_KEY not in app.session_state

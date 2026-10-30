@@ -24,7 +24,10 @@ def confirm_dialog(
     `st.session_state` に確認待ちの状態を持ち、その状態がある間は毎回この関数を
     呼ぶ必要がある（`UID-052` の2段階の登録と同様の考え方）。「キャンセル」を
     押したときは、`on_cancel` を呼んでから閉じる（呼び出し側は、ここで確認待ちの
-    状態を破棄する）。
+    状態を破棄する）。右上の「×」・Esc キー・ダイアログの外のクリックで閉じたときも、
+    キャンセルと同じ扱いとし、`on_cancel` を呼んでから再実行する（`st.dialog` の
+    `on_dismiss`）。閉じても確認待ちの状態が残ると、後の再実行で、頼んでいないのに
+    ダイアログが開き直すため。`on_cancel` を渡さないときは、閉じても再実行しない。
 
     注意：確認待ちの状態を `st.session_state` に保存するときは、`dict` や文字列
     など組み込み型にすること。スクリプトのファイルごと再実行されるたびに、画面の
@@ -38,7 +41,7 @@ def confirm_dialog(
     残し、ダイアログが閉じた後の通常の描画で表示すること。
     """
 
-    @st.dialog(title)
+    @st.dialog(title, on_dismiss="ignore" if on_cancel is None else on_cancel)
     def _dialog() -> None:
         st.write(message)
         confirm_column, cancel_column = st.columns(2)
