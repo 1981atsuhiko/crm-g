@@ -337,6 +337,19 @@ def test_verify_schema_is_current_rejects_missing_file_without_creating_it(
     assert not db_path.exists()
 
 
+def test_verify_schema_is_current_rejects_checksum_mismatch(tmp_path: Path) -> None:
+    """適用済みの連番SQLの中身が変わっていたら、エラーにする（DB を変えない）。"""
+    ddl_dir = tmp_path / "ddl"
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")
+    db_path = _migrated_db(tmp_path, ddl_dir)
+    _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY, x TEXT);")
+    before = _snapshot(db_path)
+
+    with pytest.raises(ChecksumMismatchError, match="001_create_a"):
+        verify_schema_is_current(db_path, ddl_dir)
+    assert _snapshot(db_path) == before
+
+
 def test_verify_schema_is_current_rejects_newer_version_and_invalid_file(tmp_path: Path) -> None:
     ddl_dir = tmp_path / "ddl"
     _write_sql(ddl_dir, "001_create_a.sql", "CREATE TABLE a (id INTEGER PRIMARY KEY);")

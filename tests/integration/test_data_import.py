@@ -19,6 +19,7 @@ from crm_g.application.data_import import (
     ImportInTransactionError,
     ImportKind,
     ImportKindDefinition,
+    ImportRolledBackError,
     InsertOutcome,
     RecalculationRequest,
     ValidatedImport,
@@ -503,7 +504,11 @@ def test_tc_mig_040_exception_rolls_back_data_and_operation_log(
     monkeypatch: pytest.MonkeyPatch,
     captured_log: pytest.LogCaptureFixture,
 ) -> None:
-    """取込の実行の途中の例外で、業務データも操作ログもロールバックされ、例外が再送出される。"""
+    """取込の実行の途中の例外で、業務データも操作ログもロールバックされ、例外が送出される。
+
+    取込前のバックアップを作った後の例外は、`ImportRolledBackError`（元の例外を `__cause__` に
+    持つ）になり、取込前のバックアップのパスを持つ。ログは、元の例外の型名を1回だけ出す。
+    """
 
     def record_then_fail(
         target: sqlite3.Connection,
@@ -516,13 +521,18 @@ def test_tc_mig_040_exception_rolls_back_data_and_operation_log(
 
     monkeypatch.setattr(data_import, "record_operation_log", record_then_fail)
 
-    with pytest.raises(RuntimeError, match="試験のための失敗"):
+    with pytest.raises(ImportRolledBackError) as raised:
         _run(connection, db_path, _csv(_TARO, _HANAKO))
 
+    assert isinstance(raised.value.__cause__, RuntimeError)
+    assert raised.value.backup_path.is_file()
+    assert raised.value.backup_path.parent == db_path.parent / "backups"
     assert not connection.in_transaction
     assert _employees(connection) == []
     assert _operation_logs(connection) == []
-    assert "例外=RuntimeError" in captured_log.text
+    assert _error_messages(captured_log) == [
+        "取込に失敗し、ロールバックしました（種類=employee 例外=RuntimeError）"
+    ]
     assert "taro" not in captured_log.text.lower()
 
 
@@ -599,9 +609,12 @@ def test_backup_is_made_while_holding_the_write_lock(
 
 
 def test_run_import_inside_transaction_is_rejected(
-    connection: sqlite3.Connection, db_path: Path
+    connection: sqlite3.Connection, db_path: Path, captured_log: pytest.LogCaptureFixture
 ) -> None:
-    """呼び出し側のトランザクションの中では、取込の実行を拒む（ロールバックできないため）。"""
+    """呼び出し側のトランザクションの中では、取込の実行を拒む（ロールバックできないため）。
+
+    拒んだことは、例外の型名だけでログ（ERROR）に出す。
+    """
     connection.execute("BEGIN")
     try:
         with pytest.raises(ImportInTransactionError) as raised:
@@ -612,6 +625,71 @@ def test_run_import_inside_transaction_is_rejected(
     assert "taro" not in str(raised.value).lower()
     assert _employees(connection) == []
     assert not (db_path.parent / "backups").exists()
+    assert _error_messages(captured_log) == [
+        "取込を開始できませんでした（種類=employee 例外=ImportInTransactionError）"
+    ]
+
+
+def _error_messages(captured_log: pytest.LogCaptureFixture) -> list[str]:
+    """ERROR のログのメッセージ（ログの出力の回数を数えるため、同じ記録は1回だけ数える）。
+
+    `captured_log` は、伝播の設定によっては、同じ記録を2回捕まえるため。
+    """
+    records = {id(record): record for record in captured_log.records}.values()
+    return [record.getMessage() for record in records if record.levelno == logging.ERROR]
+
+
+def _register_failing_validator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """社員の検証が、値を含む文言の例外で止まるようにする。"""
+
+    def fail(_connection: sqlite3.Connection, _content: bytes, _today: date) -> ValidatedImport:
+        raise ValueError("山田 太郎 の値を含む擬似的な失敗")
+
+    monkeypatch.setitem(
+        data_import._DEFINITIONS,
+        ImportKind.EMPLOYEE,
+        ImportKindDefinition(label="社員", target_table="employee", validate=fail),
+    )
+
+
+def test_check_exception_is_logged_with_type_only(
+    connection: sqlite3.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    captured_log: pytest.LogCaptureFixture,
+) -> None:
+    """確認の実行の、検証の途中の例外は、型名だけを1回ログに出して、再送出する（`MIG-056`）。"""
+    _register_failing_validator(monkeypatch)
+
+    with pytest.raises(ValueError, match="擬似的な失敗"):
+        check_import(connection, _EMPLOYEE, _csv(_TARO), _TODAY)
+
+    assert _error_messages(captured_log) == [
+        "取込の検証の途中で失敗しました（種類=employee 例外=ValueError）"
+    ]
+    assert "山田" not in captured_log.text
+
+
+def test_run_validation_exception_before_transaction_is_logged_once(
+    connection: sqlite3.Connection,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured_log: pytest.LogCaptureFixture,
+) -> None:
+    """取込の実行の、トランザクションの前の検証の例外は、型名だけを1回ログに出して、再送出する。
+
+    取込前のバックアップは作らない（元の例外のまま送出する）。
+    """
+    _register_failing_validator(monkeypatch)
+
+    with pytest.raises(ValueError, match="擬似的な失敗"):
+        _run(connection, db_path, _csv(_TARO))
+
+    assert _error_messages(captured_log) == [
+        "取込の検証の途中で失敗しました（種類=employee 例外=ValueError）"
+    ]
+    assert "山田" not in captured_log.text
+    assert not (db_path.parent / "backups").exists()
+    assert not connection.in_transaction
 
 
 def test_tc_mig_042_restore_from_backup_returns_to_state_before_import(

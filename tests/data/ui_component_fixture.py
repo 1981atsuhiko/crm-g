@@ -31,3 +31,29 @@ st.write(f"awaiting={is_awaiting_confirmation(_FORM_KEY)}")
 
 if st.button("open_dialog", key="open_dialog_button"):
     confirm_dialog("確認", "本当に実行しますか", key="fixture_dialog", on_confirm=lambda: None)
+
+# 確認待ちの状態を持ち、再実行をまたいでダイアログを開いたままにする使い方（画面と同じ）。
+_PENDING_KEY = "fixture_pending"
+_CANCEL_COUNT_KEY = "fixture_cancel_count"
+
+if st.button("open_pending_dialog", key="open_pending_dialog_button"):
+    st.session_state[_PENDING_KEY] = True
+
+
+def _cancel_pending() -> None:
+    """取り消し。確認待ちの状態を破棄し、呼ばれた回数を数える。"""
+    st.session_state.pop(_PENDING_KEY, None)
+    st.session_state[_CANCEL_COUNT_KEY] = st.session_state.get(_CANCEL_COUNT_KEY, 0) + 1
+
+
+if st.session_state.get(_PENDING_KEY):
+    confirm_dialog(
+        "確認待ち",
+        "確認待ちのダイアログです",
+        key="fixture_pending_dialog",
+        on_confirm=lambda: st.session_state.pop(_PENDING_KEY, None),
+        on_cancel=_cancel_pending,
+    )
+
+st.write(f"pending={bool(st.session_state.get(_PENDING_KEY))}")
+st.write(f"cancel_count={st.session_state.get(_CANCEL_COUNT_KEY, 0)}")

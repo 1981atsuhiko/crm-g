@@ -3,13 +3,17 @@
 CSV は試験の中でバイト列として組み立てる。値はすべて架空である。
 """
 
+import logging
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
 import pytest
 from streamlit.testing.v1 import AppTest
+from streamlit.testing.v1.element_tree import Block
 
 import crm_g.application.data_import as data_import_app
 from crm_g.application.auth import setup_passcode
@@ -45,6 +49,8 @@ _TARO = (
 _HANAKO = "hanako.suzuki@example.com,E0002,鈴木 花子,,契約社員,,女性,2021-4-1,,,,在籍,,secret-value"
 _SALARY_HEADER = "氏名,適用開始日,給与体系,雇用形態,改定区分,基本給"
 _UNKNOWN_NAME = "架空 存在しない"
+# 画面の確認待ちの状態のキー（`data_import.py` の `_PENDING_KEY`）。
+_PENDING_KEY = "import_execute_pending"
 
 
 def _csv(header: str, *lines: str) -> bytes:
@@ -152,6 +158,68 @@ def _import_employees_directly(data_dir: Path, content: bytes = _EMPLOYEE_CSV) -
             backup_dir=data_dir / "pre-backups",
         )
     assert report.executed
+
+
+@pytest.fixture
+def captured_log(caplog: pytest.LogCaptureFixture) -> Iterator[pytest.LogCaptureFixture]:
+    """crm_g のロガーの出力を、伝播の設定によらず捕まえる。"""
+    logger = logging.getLogger("crm_g")
+    logger.addHandler(caplog.handler)
+    original_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield caplog
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(original_level)
+
+
+def _error_messages(captured_log: pytest.LogCaptureFixture) -> list[str]:
+    """ERROR のログのメッセージ（伝播の設定により2回捕まえた同じ記録は、1回だけ数える）。"""
+    records = {id(record): record for record in captured_log.records}.values()
+    return [record.getMessage() for record in records if record.levelno == logging.ERROR]
+
+
+def _register_failing_validator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """社員の検証が、値を含む文言の例外で止まるようにする。"""
+
+    def _fail(_connection: sqlite3.Connection, _content: bytes, _today: date) -> ValidatedImport:
+        raise ValueError("山田 太郎 の値を含む擬似的な失敗")
+
+    monkeypatch.setitem(
+        data_import_app._DEFINITIONS,
+        ImportKind.EMPLOYEE,
+        ImportKindDefinition(label="社員", target_table="employee", validate=_fail),
+    )
+
+
+def _blocks(block: Block) -> list[Block]:
+    """ブロックと、その中のブロックを、深さ優先で返す。"""
+    found = [block]
+    for child in block.children.values():
+        if isinstance(child, Block):
+            found.extend(_blocks(child))
+    return found
+
+
+def _has_dialog(app: AppTest) -> bool:
+    return any(node.type == "dialog" for node in _blocks(app._tree))
+
+
+def _dismiss_dialog(app: AppTest) -> AppTest:
+    """開いているダイアログを、右上の「×」・Esc キーで閉じた操作を再現して、再実行する。
+
+    `AppTest` には、ダイアログを閉じる操作がない。`on_dismiss` を渡した `st.dialog` は、
+    ダイアログのブロックの ID のウィジェットとして登録され、閉じるとフロントエンドが、その
+    ウィジェットの trigger の値を送る。ここでは、同じ値を組み立てて、再実行に渡す。
+    """
+    dialogs = [node for node in _blocks(app._tree) if node.type == "dialog"]
+    assert len(dialogs) == 1, "開いているダイアログが1つではありません"
+    widget_states = app._tree.get_widget_states()
+    dismissed = widget_states.widgets.add()
+    dismissed.id = dialogs[0].proto.dialog.id
+    dismissed.trigger_value = True
+    return app._run(widget_states)
 
 
 def test_initial_screen_has_kinds_and_disabled_buttons(data_dir: Path) -> None:
@@ -314,6 +382,62 @@ def test_cancel_keeps_data_and_checked_csv(data_dir: Path) -> None:
     assert not app.button(key="import_execute").disabled
 
 
+def test_dismissing_dialog_discards_pending_and_recheck_does_not_reopen_it(
+    data_dir: Path,
+) -> None:
+    """確認ダイアログを「×」・Esc キーで閉じると、確認待ちを破棄する（キャンセルと同じ）。
+
+    その後に確認をやり直しても、頼んでいないのにダイアログが開かない。
+    """
+    app = _check(_upload(_new_app(), _EMPLOYEE_CSV))
+    app.button(key="import_execute").click()
+    app = app.run()
+    assert _has_dialog(app)
+
+    app = _dismiss_dialog(app)
+
+    assert not app.exception
+    assert not _has_dialog(app)
+    assert _PENDING_KEY not in app.session_state
+    assert _count(data_dir, "employee") == 0
+    assert _backups(data_dir) == []
+    assert IMPORT_STATE_KEY in app.session_state
+
+    app = _check(app)
+
+    assert not app.exception
+    assert not _has_dialog(app)
+    assert _count(data_dir, "employee") == 0
+
+
+def test_check_discards_pending_confirmation(data_dir: Path) -> None:
+    """「確認の実行」を押すと、確認待ちが残っていても破棄し、ダイアログを開かない。"""
+    app = _check(_upload(_new_app(), _EMPLOYEE_CSV))
+    app.session_state[_PENDING_KEY] = True
+
+    app = _check(app)
+
+    assert not app.exception
+    assert not _has_dialog(app)
+    assert _PENDING_KEY not in app.session_state
+
+
+def test_pending_with_errors_in_check_result_does_not_open_dialog(data_dir: Path) -> None:
+    """確認の結果にエラーがあるときは、確認待ちを破棄し、ダイアログから取り込ませない。"""
+    broken = _TARO.replace("2020/04/01", "")
+    app = _check(_upload(_new_app(), _csv(_EMPLOYEE_HEADER, broken)))
+    assert app.button(key="import_execute").disabled
+    app.session_state[_PENDING_KEY] = True
+
+    app = app.run()
+
+    assert not app.exception
+    assert not _has_dialog(app)
+    assert _PENDING_KEY not in app.session_state
+    assert _count(data_dir, "employee") == 0
+    assert _backups(data_dir) == []
+
+
 def test_changing_kind_or_file_discards_checked_csv(data_dir: Path) -> None:
     app = _check(_upload(_new_app(), _EMPLOYEE_CSV))
     assert IMPORT_STATE_KEY in app.session_state
@@ -371,10 +495,106 @@ def test_unexpected_exception_shows_general_message_and_restore_guide(
     assert not app.exception
     texts = _texts(app)
     assert UNEXPECTED_ERROR_MESSAGE in texts
-    assert "バックアップ・復元" in texts
+    # 取込前のバックアップを作る前に止まったため、以前のバックアップからの復元を案内する。
+    assert "以前のバックアップから復元できます" in texts
+    assert "取込前のバックアップから復元" not in texts
     assert "山田" not in texts
     assert _count(data_dir, "employee") == 0
     assert IMPORT_STATE_KEY not in app.session_state
+
+
+def test_exception_after_backup_guides_to_the_backup(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, captured_log: pytest.LogCaptureFixture
+) -> None:
+    """取込前のバックアップを作った後の例外は、そのファイル名と、そこからの復元を案内する。"""
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("山田 太郎 の値を含む擬似的な失敗")
+
+    app = _check(_upload(_new_app(), _EMPLOYEE_CSV))
+    monkeypatch.setattr(data_import_app, "record_operation_log", _raise)
+    app = _execute(app)
+
+    assert not app.exception
+    texts = _texts(app)
+    backups = _backups(data_dir)
+    assert len(backups) == 1
+    assert UNEXPECTED_ERROR_MESSAGE in texts
+    assert f"取込前のバックアップ**：{backups[0].name}" in texts
+    assert "取込前のバックアップから復元できます" in texts
+    assert "以前のバックアップ" not in texts
+    assert "山田" not in texts
+    assert str(data_dir) not in texts
+    assert _count(data_dir, "employee") == 0
+    assert app.session_state[IMPORT_RESULT_KEY]["failure"] == "rolled_back"
+    assert _error_messages(captured_log) == [
+        "取込に失敗し、ロールバックしました（種類=employee 例外=RuntimeError）"
+    ]
+
+
+def test_validation_exception_on_execute_is_logged_once(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, captured_log: pytest.LogCaptureFixture
+) -> None:
+    """取込の実行の、検証の途中の例外は、型名だけを1回ログに出し、以前のバックアップを案内する。"""
+    app = _check(_upload(_new_app(), _EMPLOYEE_CSV))
+    _register_failing_validator(monkeypatch)
+    app = _execute(app)
+
+    assert not app.exception
+    texts = _texts(app)
+    assert UNEXPECTED_ERROR_MESSAGE in texts
+    assert "以前のバックアップから復元できます" in texts
+    assert _backups(data_dir) == []
+    assert _error_messages(captured_log) == [
+        "取込の検証の途中で失敗しました（種類=employee 例外=ValueError）"
+    ]
+    assert "山田" not in captured_log.text
+
+
+def test_validation_exception_on_check_is_logged_once(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, captured_log: pytest.LogCaptureFixture
+) -> None:
+    """確認の実行の、検証の途中の例外は、型名だけを1回ログに出す（画面は重ねて出さない）。"""
+    app = _upload(_new_app(), _EMPLOYEE_CSV)
+    _register_failing_validator(monkeypatch)
+    app = _check(app)
+
+    assert not app.exception
+    assert UNEXPECTED_ERROR_MESSAGE in _texts(app)
+    assert _error_messages(captured_log) == [
+        "取込の検証の途中で失敗しました（種類=employee 例外=ValueError）"
+    ]
+    assert "山田" not in captured_log.text
+
+
+@pytest.mark.parametrize("execute", [False, True])
+def test_connection_failure_is_logged_once_by_the_screen(
+    data_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured_log: pytest.LogCaptureFixture,
+    execute: bool,  # noqa: FBT001 pytest のパラメーター
+) -> None:
+    """DB の接続を開けないときは、画面が型名だけを1回ログに出す（値・パスは出さない）。"""
+
+    def _fail(_db_path: Path) -> Iterator[sqlite3.Connection]:
+        raise sqlite3.OperationalError(f"開けません: {data_dir}")
+
+    app = _upload(_new_app(), _EMPLOYEE_CSV)
+    if execute:
+        app = _check(app)
+    monkeypatch.setattr("crm_g.infrastructure.db.open_connection", contextmanager(_fail))
+    app = _execute(app) if execute else _check(app)
+
+    assert not app.exception
+    texts = _texts(app)
+    assert UNEXPECTED_ERROR_MESSAGE in texts
+    if execute:
+        assert "以前のバックアップから復元できます" in texts
+    assert str(data_dir) not in texts
+    assert _error_messages(captured_log) == [
+        "取込の画面で、DB の接続に失敗しました（例外=OperationalError）"
+    ]
+    assert str(data_dir) not in captured_log.text
 
 
 def test_check_exception_shows_general_message(

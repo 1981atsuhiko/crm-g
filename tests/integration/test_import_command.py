@@ -8,6 +8,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -17,7 +19,6 @@ import pytest
 import crm_g.application.data_import as data_import_app
 from crm_g.application.data_import import (
     ERROR_DISPLAY_LIMIT,
-    ImportInTransactionError,
     ImportKind,
     ImportKindDefinition,
     ImportReport,
@@ -304,6 +305,54 @@ def test_newer_db_exits_with_2(
     assert _employee_count(data_dir) == 0
 
 
+def test_invalid_db_file_exits_with_2_and_guides_to_check_the_file(
+    data_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """このアプリの DB でないファイルのときは、終了コード 2。アプリの起動ではなく、DB ファイルの
+    確認とバックアップからの復元を案内する。ファイルは変えない。
+    """
+    db_path = data_dir / "crm-g.db"
+    db_path.write_bytes(b"this is not a sqlite database file" * 100)
+    before = db_path.read_bytes()
+    csv_path = _write_csv(tmp_path, "employee.csv", _csv(_EMPLOYEE_HEADER, _TARO))
+
+    exit_code = main(["import", "employee", str(csv_path)])
+
+    output = capsys.readouterr().out
+    assert exit_code == 2
+    assert "DB ファイルが、このアプリの DB として読めません" in output
+    assert "必要なら、バックアップから復元してください" in output
+    assert "アプリを一度起動してから" not in output
+    assert db_path.read_bytes() == before
+    assert "例外=InvalidDatabaseFileError" in _log_text(data_dir)
+
+
+def test_checksum_mismatch_exits_with_2_with_version_message(
+    data_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """適用済みの連番SQLのチェックサムが合わないときは、終了コード 2。版が合わないと案内する。"""
+    changed_ddl = tmp_path / "changed-ddl"
+    shutil.copytree(_DDL_DIR, changed_ddl)
+    first_sql = sorted(changed_ddl.glob("*.sql"))[0]
+    first_sql.write_text(
+        first_sql.read_text(encoding="utf-8") + "\n-- 試験のための変更\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(import_command, "BUNDLED_DDL_DIR", changed_ddl)
+    before = (data_dir / "crm-g.db").read_bytes()
+    csv_path = _write_csv(tmp_path, "employee.csv", _csv(_EMPLOYEE_HEADER, _TARO))
+
+    exit_code = main(["import", "employee", str(csv_path)])
+
+    output = capsys.readouterr().out
+    assert exit_code == 2
+    assert "DB のスキーマの版が、このアプリと合いません" in output
+    assert (data_dir / "crm-g.db").read_bytes() == before
+    assert "例外=ChecksumMismatchError" in _log_text(data_dir)
+
+
 def test_missing_csv_exits_with_2(
     data_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -357,34 +406,109 @@ def test_tc_mig_047_running_app_lock_exits_with_2(
         exit_code = main(["import", "employee", str(csv_path)])
 
     assert exit_code == 2
-    assert "アプリが起動中です" in capsys.readouterr().out
+    assert "アプリまたは別の移行コマンドが実行中です" in capsys.readouterr().out
     assert _employee_count(data_dir) == 0
 
 
-def test_unexpected_exception_exits_with_2_and_logs_only_the_type(
+def test_exception_after_backup_exits_with_2_and_guides_to_the_backup(
     data_dir: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """取込の中の例外は、一般的なメッセージで終了コード 2。ログには型名だけ（`ARC-018`）。"""
+    """取込前のバックアップを作った後の例外は、終了コード 2。そのバックアップからの復元を案内する。
+
+    ログには型名だけを1回出す（`ARC-018`、`MIG-056`）。
+    """
     csv_path = _write_csv(tmp_path, "employee.csv", _csv(_EMPLOYEE_HEADER, _TARO))
 
-    def _raise(*_args: object, **_kwargs: object) -> ImportReport:
+    def _raise(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("山田 太郎 の値を含む擬似的な失敗")
 
-    monkeypatch.setattr(import_command, "run_import", _raise)
+    monkeypatch.setattr(data_import_app, "record_operation_log", _raise)
+
+    exit_code = main(["import", "employee", str(csv_path)])
+
+    assert exit_code == 2
+    output = capsys.readouterr().out
+    backups = _backups(data_dir)
+    assert len(backups) == 1
+    assert "取込に失敗しました" in output
+    assert f"取込前のバックアップ: {backups[0].name}" in output
+    assert "取込前のバックアップから復元できます" in output
+    assert "以前のバックアップ" not in output
+    assert "山田" not in output
+    assert str(data_dir) not in output
+    assert _employee_count(data_dir) == 0
+    log_text = _log_text(data_dir)
+    assert log_text.count("例外=RuntimeError") == 1
+    assert "山田" not in log_text
+
+
+@pytest.mark.parametrize("check_only", [True, False])
+def test_validation_exception_exits_with_2_and_guides_to_earlier_backup(
+    data_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    check_only: bool,  # noqa: FBT001 pytest のパラメーター
+) -> None:
+    """検証の途中の例外（取込前のバックアップの前）は、以前のバックアップからの復元を案内する。
+
+    ログには型名だけを1回出す（アプリケーション層が出し、コマンドは重ねて出さない）。
+    """
+    csv_path = _write_csv(tmp_path, "employee.csv", _csv(_EMPLOYEE_HEADER, _TARO))
+
+    def _fail(_connection: sqlite3.Connection, _content: bytes, _today: date) -> ValidatedImport:
+        raise ValueError("山田 太郎 の値を含む擬似的な失敗")
+
+    monkeypatch.setitem(
+        data_import_app._DEFINITIONS,
+        ImportKind.EMPLOYEE,
+        ImportKindDefinition(label="社員", target_table="employee", validate=_fail),
+    )
+    arguments = ["import", "employee", str(csv_path)] + (["--check"] if check_only else [])
+
+    exit_code = main(arguments)
+
+    assert exit_code == 2
+    output = capsys.readouterr().out
+    assert "取込に失敗しました" in output
+    assert "以前のバックアップから復元できます" in output
+    assert "取込前のバックアップから復元" not in output
+    assert "山田" not in output
+    assert _backups(data_dir) == []
+    log_text = _log_text(data_dir)
+    assert log_text.count("例外=ValueError") == 1
+    assert "取込の検証の途中で失敗しました" in log_text
+    assert "山田" not in log_text
+
+
+def test_connection_failure_exits_with_2_and_logs_the_type_once(
+    data_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """DB の接続を開けないときは、終了コード 2。コマンドが型名だけを1回ログに出す。"""
+    csv_path = _write_csv(tmp_path, "employee.csv", _csv(_EMPLOYEE_HEADER, _TARO))
+
+    def _fail(_db_path: Path) -> Iterator[sqlite3.Connection]:
+        raise sqlite3.OperationalError(f"開けません: {data_dir}")
+
+    monkeypatch.setattr(import_command, "open_connection", contextmanager(_fail))
 
     exit_code = main(["import", "employee", str(csv_path)])
 
     assert exit_code == 2
     output = capsys.readouterr().out
     assert "取込に失敗しました" in output
-    assert "取込前のバックアップから復元できます" in output
-    assert "山田" not in output
+    assert "以前のバックアップから復元できます" in output
+    assert str(data_dir) not in output
     log_text = _log_text(data_dir)
-    assert "例外=RuntimeError" in log_text
-    assert "山田" not in log_text
+    assert log_text.count("例外=OperationalError") == 1
+    assert "DB の接続に失敗しました" in log_text
+    assert str(data_dir) not in log_text
 
 
 def _subprocess_env(local_app_data: Path) -> dict[str, str]:
@@ -418,7 +542,7 @@ def test_tc_mig_047_process_exits_with_2_while_another_process_holds_the_lock(
         result = _run_command(tmp_path, "import", "employee", str(csv_path))
 
     assert result.returncode == 2, result.stderr
-    assert "アプリが起動中です" in result.stdout
+    assert "アプリまたは別の移行コマンドが実行中です" in result.stdout
     assert _employee_count(data_dir) == 0
 
 
@@ -436,6 +560,40 @@ def test_tc_mig_046_process_exit_codes_for_check(data_dir: Path, tmp_path: Path)
     assert bad_result.returncode == 1, bad_result.stderr
     assert "E006" in bad_result.stdout
     assert (data_dir / "crm-g.db").read_bytes() == before
+
+
+def test_cp932_stdout_replaces_unencodable_characters_and_keeps_going(
+    data_dir: Path, tmp_path: Path
+) -> None:
+    """標準出力が cp932 のとき、表せない文字（氏名の異体字など）は置き換え、出力を止めない。
+
+    名寄せで一致しなかった人の氏名に、cp932 にない文字（U+20BB7）を含める。
+    """
+    unencodable_name = "\U00020bb7野 架空"
+    salary_csv = _write_csv(
+        tmp_path,
+        "salary.csv",
+        _csv(_SALARY_HEADER, f"{unencodable_name},2026/04/01,通常評価制度,正社員,入社,250000"),
+    )
+    env = _subprocess_env(tmp_path)
+    env["PYTHONIOENCODING"] = "cp932"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "crm_g.cli.launcher", "import", "salary-history", str(salary_csv)],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="cp932",
+        timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stderr
+    assert "UnicodeEncodeError" not in result.stderr
+    assert "名寄せで一致しなかった人: 1 件" in result.stdout
+    assert "  ?野 架空\t-\t行 2\tE010 社員が見つからない" in result.stdout
+    # 置き換えた行の後も、最後まで出力する。
+    assert "結果: エラーがあるため、取り込みませんでした" in result.stdout
 
 
 def _report(**overrides: object) -> ImportReport:
@@ -597,13 +755,22 @@ def test_in_transaction_error_exits_with_2(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """取込を始める前に止まったとき（`ImportInTransactionError`）は、終了コード 2。"""
+    """取込を始める前に止まったとき（`ImportInTransactionError`）は、終了コード 2。
+
+    接続がトランザクションの中の状態を作る。ログは、アプリケーション層が型名だけを1回出す。
+    """
     csv_path = _write_csv(tmp_path, "employee.csv", _csv(_EMPLOYEE_HEADER, _TARO))
 
-    def _raise(*_args: object, **_kwargs: object) -> ImportReport:
-        raise ImportInTransactionError("取込の実行は、トランザクションの外で呼んでください")
+    @contextmanager
+    def _open_in_transaction(db_path: Path) -> Iterator[sqlite3.Connection]:
+        with open_connection(db_path) as connection:
+            connection.execute("BEGIN")
+            try:
+                yield connection
+            finally:
+                connection.rollback()
 
-    monkeypatch.setattr(import_command, "run_import", _raise)
+    monkeypatch.setattr(import_command, "open_connection", _open_in_transaction)
 
     exit_code = main(["import", "employee", str(csv_path)])
 
@@ -612,7 +779,8 @@ def test_in_transaction_error_exits_with_2(
     assert "取込を開始できませんでした" in output
     assert "以前のバックアップから復元できます" in output
     assert "トランザクション" not in output
-    assert "例外=ImportInTransactionError" in _log_text(data_dir)
+    assert _log_text(data_dir).count("例外=ImportInTransactionError") == 1
+    assert _employee_count(data_dir) == 0
 
 
 def test_revalidation_failure_under_lock_exits_with_1_and_reports_backup(

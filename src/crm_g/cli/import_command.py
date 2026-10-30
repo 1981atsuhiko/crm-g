@@ -5,13 +5,17 @@
 `run_import`）を呼ぶ（`MIG-006`）。
 
 - パスコードの認証を求めない（権限・セキュリティ設計書 `SCD-063`）
-- アプリと同じ排他ロックを取る。アプリの起動中は、実行しない（`ARC-007`）
+- アプリと同じ排他ロックを取る。アプリ・別の移行コマンドの実行中は、実行しない（`ARC-007`）
 - マイグレーションは適用しない。DB がないとき・未適用の連番SQLがあるときは、DB を変えずに、
-  アプリを一度起動するよう案内する（ユーザー承認 2026-10-27）
+  アプリを一度起動するよう案内する（ユーザー承認 2026-10-27）。このアプリの DB でない
+  ファイルのときは、DB ファイルの確認と、バックアップからの復元を案内する
 - 終了コードは、`0`：エラーなし、`1`：検証のエラーがある（取り込んでいない）、
-  `2`：実行できない（引数の誤り、アプリの起動中、DB の版が合わない、取込前のバックアップを
-  作れない、例外。`MGD-009`）。`2` のときは、値・パスを出さない一般的なメッセージと、
-  復元の案内を出す
+  `2`：実行できない（引数の誤り、アプリ・別の移行コマンドの実行中、DB の版が合わない、
+  取込前のバックアップを作れない、例外。`MGD-009`）。`2` のときは、値・パスを出さない一般的な
+  メッセージと、復元の案内を出す。復元の案内は、取込前のバックアップを作った後の例外だけ
+  「取込前のバックアップから」とし、それより前のときは「以前のバックアップから」とする
+- 例外の原因は、型名だけをログに出す。ユースケースの中の例外はアプリケーション層が出し、
+  ここでは重ねて出さない
 - レポート（`MIG-061`）は、標準出力に出す。名寄せで一致しなかった人の氏名は、標準出力にだけ
   出し、ログには件数だけを出す（`MIG-005`、`SCD-042`）
 
@@ -31,6 +35,7 @@ from crm_g.application.data_import import (
     ImportInTransactionError,
     ImportKind,
     ImportReport,
+    ImportRolledBackError,
     check_import,
     run_import,
 )
@@ -65,8 +70,8 @@ EXIT_SUCCESS = 0
 EXIT_VALIDATION_ERROR = 1
 """検証のエラーがある（取り込んでいない）。"""
 EXIT_CANNOT_RUN = 2
-"""実行できない（引数の誤り、アプリの起動中、ファイルが開けない、DB の版が合わない、
-取込前のバックアップを作れない、例外）。"""
+"""実行できない（引数の誤り、アプリ・別の移行コマンドの実行中、ファイルが開けない、DB の準備が
+できていない、このアプリの DB でない、DB の版が合わない、取込前のバックアップを作れない、例外）。"""
 
 _CHECK_OPTION = "--check"
 _HELP_OPTIONS = ("-h", "--help")
@@ -80,20 +85,29 @@ USAGE = (
 _SETUP_REQUIRED_MESSAGE = (
     "DB の準備ができていません。アプリを一度起動してから、やり直してください。"
 )
+_INVALID_DATABASE_MESSAGE = (
+    "DB ファイルが、このアプリの DB として読めません。DB ファイルを確認してください。"
+    "必要なら、バックアップから復元してください。"
+)
 _VERSION_MISMATCH_MESSAGE = (
     "DB のスキーマの版が、このアプリと合いません。アプリの版を確認してください。"
 )
-_ALREADY_RUNNING_MESSAGE = "アプリが起動中です。アプリを終了してから、やり直してください。"
-_CANNOT_OPEN_MESSAGE = "CSV ファイルを開けません。パスを確認してください。"
-_UNEXPECTED_MESSAGE = (
-    "取込に失敗しました。詳しくはログを確認してください。\n"
-    "  取り込みは行っていません。データの状態が気になるときは、アプリの「設定」の"
-    "「バックアップ・復元」で、取込前のバックアップから復元できます。"
+_ALREADY_RUNNING_MESSAGE = (
+    "アプリまたは別の移行コマンドが実行中です。終了してから、やり直してください。"
 )
+_CANNOT_OPEN_MESSAGE = "CSV ファイルを開けません。パスを確認してください。"
+_FAILED_MESSAGE = "取込に失敗しました。詳しくはログを確認してください。"
+# 取込前のバックアップを作る前に止まったとき（取込前のバックアップはない）の案内。
 _NOT_STARTED_GUIDE = (
     "  取り込みは行っていません。データの状態が気になるときは、アプリの「設定」の"
     "「バックアップ・復元」で、以前のバックアップから復元できます。"
 )
+# 取込前のバックアップを作った後に止まったとき（ロールバック済み）の案内。
+_ROLLED_BACK_GUIDE = (
+    "  取り込みは行っていません。データの状態が気になるときは、アプリの「設定」の"
+    "「バックアップ・復元」で、取込前のバックアップから復元できます。"
+)
+_UNEXPECTED_MESSAGE = _FAILED_MESSAGE + "\n" + _NOT_STARTED_GUIDE
 _BACKUP_FAILURE_MESSAGE = (
     "取込前のバックアップを作成できなかったため、取り込みませんでした。"
     "保存先の空き容量と書き込みの権限を確認してから、やり直してください。\n" + _NOT_STARTED_GUIDE
@@ -262,6 +276,52 @@ def format_report(report: ImportReport, *, check_only: bool) -> str:
     return "\n".join(output)
 
 
+def _run_use_case(parsed: ImportArguments, paths: AppPaths, content: bytes) -> ImportReport | None:
+    """DB を開き、確認・取込のユースケースを呼ぶ。例外のときは、案内を出して `None` を返す。
+
+    ユースケースの中の例外は、アプリケーション層が型名だけをログに残す。この関数は、DB の
+    接続を開く・閉じるときの例外だけをログに残す（同じ例外を2回ログに出さないため）。
+    復元の案内は、取込前のバックアップを作った後の例外（`ImportRolledBackError`）だけ
+    「取込前のバックアップから」とし、それより前のときは「以前のバックアップから」とする。
+    """
+    in_use_case = False
+    try:
+        with open_connection(paths.db_path) as connection:
+            in_use_case = True
+            if parsed.check_only:
+                report = check_import(connection, parsed.kind, content, date.today())
+            else:
+                report = run_import(
+                    connection,
+                    parsed.kind,
+                    content,
+                    date.today(),
+                    db_path=paths.db_path,
+                    backup_dir=paths.backup_dir,
+                )
+            in_use_case = False
+    except BackupWriteError:
+        # 文言はパスを含みうるため、出さない（ARC-018）。
+        print(_BACKUP_FAILURE_MESSAGE)
+        return None
+    except ImportInTransactionError:
+        print(_IN_TRANSACTION_MESSAGE)
+        return None
+    except ImportRolledBackError as error:
+        print(
+            f"{_FAILED_MESSAGE}\n取込前のバックアップ: {error.backup_path.name}\n"
+            + _ROLLED_BACK_GUIDE
+        )
+        return None
+    except Exception as error:
+        if not in_use_case:
+            # 例外のメッセージはパスを含みうるため、ログには型名だけを出す（MIG-056、ARC-018）。
+            _logger.error("DB の接続に失敗しました（例外=%s）", type(error).__name__)
+        print(_UNEXPECTED_MESSAGE)
+        return None
+    return report
+
+
 def _execute(parsed: ImportArguments, paths: AppPaths) -> int:
     """ロックを取った後の処理。CSV を読み、DB の版を確かめてから、確認・取込をする。"""
     try:
@@ -274,36 +334,23 @@ def _execute(parsed: ImportArguments, paths: AppPaths) -> int:
 
     try:
         verify_schema_is_current(paths.db_path, BUNDLED_DDL_DIR)
-    except (DatabaseNotFoundError, PendingMigrationError, InvalidDatabaseFileError) as error:
+    except (DatabaseNotFoundError, PendingMigrationError) as error:
         _logger.error("DB の準備ができていません（例外=%s）", type(error).__name__)
         print(_SETUP_REQUIRED_MESSAGE)
+        return EXIT_CANNOT_RUN
+    except InvalidDatabaseFileError as error:
+        _logger.error(
+            "DB ファイルが、このアプリの DB ではありません（例外=%s）", type(error).__name__
+        )
+        print(_INVALID_DATABASE_MESSAGE)
         return EXIT_CANNOT_RUN
     except (UnknownMigrationError, ChecksumMismatchError) as error:
         _logger.error("DB のスキーマの版が合いません（例外=%s）", type(error).__name__)
         print(_VERSION_MISMATCH_MESSAGE)
         return EXIT_CANNOT_RUN
 
-    today = date.today()
-    try:
-        with open_connection(paths.db_path) as connection:
-            if parsed.check_only:
-                report = check_import(connection, parsed.kind, content, today)
-            else:
-                report = run_import(
-                    connection,
-                    parsed.kind,
-                    content,
-                    today,
-                    db_path=paths.db_path,
-                    backup_dir=paths.backup_dir,
-                )
-    except BackupWriteError:
-        # 原因はアプリケーション層がログに残す。文言はパスを含みうるため、出さない（ARC-018）。
-        print(_BACKUP_FAILURE_MESSAGE)
-        return EXIT_CANNOT_RUN
-    except ImportInTransactionError:
-        _logger.error("取込を開始できませんでした（例外=ImportInTransactionError）")
-        print(_IN_TRANSACTION_MESSAGE)
+    report = _run_use_case(parsed, paths, content)
+    if report is None:
         return EXIT_CANNOT_RUN
     print(format_report(report, check_only=parsed.check_only))
     # 一致しなかった人の一覧は氏名を含むため、ログには件数だけを出す（MIG-005）。

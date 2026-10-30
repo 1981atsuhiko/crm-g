@@ -12,10 +12,20 @@
 氏名は、画面にだけ出す（`MIG-032`）。
 
 取込前のバックアップを作れないとき（`BackupWriteError`）・取込の中の例外は、値・パスを出さない
-一般的なメッセージと、復元の案内を出す（`ARC-018`）。書き込みのロックの後の再検証で失敗した
-ときは、取り込まず、作成した取込前のバックアップのファイル名を示す。
+一般的なメッセージと、復元の案内を出す（`ARC-018`）。復元の案内は、取込前のバックアップを
+作った後の例外（`ImportRolledBackError`）だけ「取込前のバックアップから」とし、そのファイル名を
+示す。それより前に止まったときは「以前のバックアップから」とする。書き込みのロックの後の
+再検証で失敗したときは、取り込まず、作成した取込前のバックアップのファイル名を示す。
+
+例外の原因は、ユースケースの中の例外はアプリケーション層が、DB の接続を開く・閉じるときの
+例外はこの画面が、型名だけをログに出す（値・パスは出さない。`MIG-056`）。
+
+確認待ち（`import_execute_pending`）は、確認ダイアログの「キャンセル」・「×」・Esc キーで
+閉じたとき、「確認の実行」を押したとき、確認の結果にエラーがあるときに破棄する（頼んでいない
+のにダイアログが開き直すこと、エラーのある確認の結果を取り込むことを防ぐ）。
 """
 
+import logging
 from datetime import date
 from enum import StrEnum
 from typing import TypedDict
@@ -24,9 +34,9 @@ import streamlit as st
 
 from crm_g.application.data_import import (
     ERROR_DISPLAY_LIMIT,
-    ImportInTransactionError,
     ImportKind,
     ImportReport,
+    ImportRolledBackError,
     check_import,
     run_import,
 )
@@ -46,6 +56,9 @@ from crm_g.ui.components.messages import (
 )
 from crm_g.ui.session import IMPORT_RESULT_KEY, IMPORT_STATE_KEY
 
+# Streamlit が画面のファイルを `__main__` として実行するため、`__name__` ではなくロガー名を書く。
+_logger = logging.getLogger("crm_g.ui.views.data_import")
+
 _KIND_KEY = "import_kind"
 _UPLOADER_KEY_PREFIX = "import_file"
 # 取込の後に、ファイルの選択を空に戻すため、アップローダーのキーを変える世代の番号。
@@ -64,6 +77,7 @@ _RESTORE_GUIDE = (
     "取り込みを取り消すときは、「設定」の「バックアップ・復元」で、"
     "取込前のバックアップから復元してください。"
 )
+# 取込前のバックアップを作った後に止まったとき（ロールバック済み）の案内。
 _FAILURE_GUIDE = (
     "取り込みは行っていません。データの状態が気になるときは、「設定」の「バックアップ・復元」で、"
     "取込前のバックアップから復元できます。"
@@ -96,8 +110,11 @@ class _Failure(StrEnum):
     """取込の実行が、例外で止まったときの原因の分類（画面に出す文言を選ぶため）。"""
 
     BACKUP = "backup"
+    """取込前のバックアップを作れなかった（取り込んでいない）。"""
+    ROLLED_BACK = "rolled_back"
+    """取込前のバックアップを作った後の例外で、ロールバックした。"""
     UNEXPECTED = "unexpected"
-    NOT_STARTED = "not_started"
+    """取込前のバックアップを作る前の例外（DB の接続・検証・`ImportInTransactionError` など）。"""
 
 
 class _Checked(TypedDict):
@@ -116,11 +133,13 @@ class _Result(TypedDict):
     """取込の実行の結果。`report` は、例外で失敗したときは `None` で、`failure` に原因を持つ。
 
     `failure` は `_Failure` の値（再実行をまたぐため、文字列で持つ）。成功・検証のエラーは `None`。
+    `backup_name` は、`failure` が `ROLLED_BACK` のときの、取込前のバックアップのファイル名。
     """
 
     kind: str
     report: ImportReport | None
     failure: str | None
+    backup_name: str | None
 
 
 def _code_text(code: ImportErrorCode) -> str:
@@ -211,7 +230,7 @@ def _render_result(result: _Result) -> None:
     st.subheader("取込の結果")
     report = result["report"]
     if report is None:
-        _render_failure(result["failure"])
+        _render_failure(result["failure"], result["backup_name"])
         return
     if not report.executed:
         # 確認の後に DB が変わり、取込の実行の中の検証・再検証でエラーになったとき（MIG-050）。
@@ -237,17 +256,27 @@ def _render_result(result: _Result) -> None:
     show_status(_RESTORE_GUIDE)
 
 
-def _render_failure(failure: str | None) -> None:
-    """例外で止まったときの表示。値・パスは出さず、一般的なメッセージと復元の案内を出す。"""
+def _render_failure(failure: str | None, backup_name: str | None) -> None:
+    """例外で止まったときの表示。値・パスは出さず、一般的なメッセージと復元の案内を出す。
+
+    取込前のバックアップがあるとき（`ROLLED_BACK`）だけ、そのファイル名と、そこからの復元を
+    案内する。ないときは、以前のバックアップからの復元を案内する。
+    """
     if failure == _Failure.BACKUP:
         show_errors([_BACKUP_FAILURE_MESSAGE])
         show_status(_NOT_STARTED_GUIDE)
-    elif failure == _Failure.NOT_STARTED:
+    elif failure == _Failure.ROLLED_BACK and backup_name is not None:
         show_errors([UNEXPECTED_ERROR_MESSAGE])
-        show_status(_NOT_STARTED_GUIDE)
+        st.markdown(f"**取込前のバックアップ**：{backup_name}")
+        show_status(_FAILURE_GUIDE)
     else:
         show_errors([UNEXPECTED_ERROR_MESSAGE])
-        show_status(_FAILURE_GUIDE)
+        show_status(_NOT_STARTED_GUIDE)
+
+
+def _log_connection_failure(error: Exception) -> None:
+    """DB の接続を開く・閉じるときの例外を、型名だけでログに出す（値・パスは出さない）。"""
+    _logger.error("取込の画面で、DB の接続に失敗しました（例外=%s）", type(error).__name__)
 
 
 def _execute(checked: _Checked) -> None:
@@ -262,11 +291,16 @@ def _execute(checked: _Checked) -> None:
     )
     report: ImportReport | None = None
     failure: _Failure | None = None
+    backup_name: str | None = None
+    # ユースケースの中の例外は、アプリケーション層がログに残す。それ以外（DB の接続を開く・
+    # 閉じるときの例外）だけを、この画面がログに残す（同じ例外を2回ログに出さないため）。
+    in_use_case = False
     try:
         with (
             st.spinner("取り込んでいます…"),
             open_connection(paths.db_path) as connection,
         ):
+            in_use_case = True
             report = run_import(
                 connection,
                 kind,
@@ -275,18 +309,25 @@ def _execute(checked: _Checked) -> None:
                 db_path=paths.db_path,
                 backup_dir=paths.backup_dir,
             )
+            in_use_case = False
     except BackupWriteError:
-        # 取込前のバックアップを作れず、取り込まなかった（MIG-053）。原因はアプリケーション層が
-        # ログに残す。例外の文言はパスを含みうるため、画面に出さない（ARC-018）。
+        # 取込前のバックアップを作れず、取り込まなかった（MIG-053）。例外の文言はパスを
+        # 含みうるため、画面に出さない（ARC-018）。
         failure = _Failure.BACKUP
-    except ImportInTransactionError:
-        # 取込を始める前に止まった（取込前のバックアップも作っていない）。
-        failure = _Failure.NOT_STARTED
-    except Exception:
-        # 原因はアプリケーション層がログに残す。画面には一般的なメッセージを出す（ARC-018）。
+    except ImportRolledBackError as error:
+        # 取込前のバックアップを作った後の例外で、ロールバックした（MIG-052）。
+        failure = _Failure.ROLLED_BACK
+        backup_name = error.backup_path.name
+    except Exception as error:
+        # 取込前のバックアップを作る前の例外。画面には一般的なメッセージを出す（ARC-018）。
+        if not in_use_case:
+            _log_connection_failure(error)
         failure = _Failure.UNEXPECTED
     st.session_state[IMPORT_RESULT_KEY] = _Result(
-        kind=kind.value, report=report, failure=None if failure is None else failure.value
+        kind=kind.value,
+        report=report,
+        failure=None if failure is None else failure.value,
+        backup_name=backup_name,
     )
     if report is not None and report.executed:
         show_success(f"{kind.label}を取り込みました")
@@ -307,8 +348,13 @@ def _confirm_message(checked: _Checked) -> str:
 
 
 def _render_pending(checked: _Checked | None) -> None:
-    """取込の実行の確認ダイアログ。確認待ちでないときは、何もしない。"""
-    if not st.session_state.get(_PENDING_KEY) or checked is None:
+    """取込の実行の確認ダイアログ。確認待ちでないときは、何もしない。
+
+    確認の結果にエラーがあるときは、確認待ちを破棄して、ダイアログを開かない（エラーのある
+    確認の結果を、ダイアログから取り込ませないため）。「キャンセル」・「×」・Esc キーで
+    閉じたときは、確認待ちを破棄する（`confirm_dialog` の `on_cancel`）。
+    """
+    if not st.session_state.get(_PENDING_KEY) or checked is None or checked["report"].has_errors:
         st.session_state.pop(_PENDING_KEY, None)
         return
 
@@ -325,11 +371,20 @@ def _render_pending(checked: _Checked | None) -> None:
 
 
 def _check(kind: ImportKind, file_id: str, content: bytes) -> None:
-    """確認の実行（`MIG-004`）。DB を変更しない。結果を UI 状態に置く。"""
+    """確認の実行（`MIG-004`）。DB を変更しない。結果を UI 状態に置く。
+
+    ユースケースの中の例外は、アプリケーション層がログに残す。DB の接続を開く・閉じるときの
+    例外だけを、この画面がログに残す。
+    """
+    in_use_case = False
     try:
         with open_connection(get_app_paths().db_path) as connection:
+            in_use_case = True
             report = check_import(connection, kind, content, date.today())
-    except Exception:
+            in_use_case = False
+    except Exception as error:
+        if not in_use_case:
+            _log_connection_failure(error)
         show_unexpected_error()
         return
     st.session_state[IMPORT_STATE_KEY] = _Checked(
@@ -366,8 +421,10 @@ def render() -> None:
     _discard_stale(kind, file_id)
 
     if st.button("確認の実行", key="import_check", disabled=uploaded is None):
+        # 確認をやり直すときは、前回の確認待ちも破棄する（頼んでいないのにダイアログを開かない）。
         st.session_state.pop(IMPORT_STATE_KEY, None)
         st.session_state.pop(IMPORT_RESULT_KEY, None)
+        st.session_state.pop(_PENDING_KEY, None)
         if uploaded is not None:
             _check(kind, uploaded.file_id, uploaded.getvalue())
 
